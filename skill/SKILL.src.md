@@ -120,6 +120,17 @@ If the follow-up introduces a new domain (vocabulary match > 0.1 for a different
 
 ---
 
+# PER-TASK REFRESH CHECK
+
+Before running any task protocol, attempt to read `.vectora/dirty`.
+
+- **File absent** (the common case): proceed immediately. No rebuild happened since the last task. Zero tokens spent on this check.
+- **File present**: the background watcher (`npx vectora watch`) has rebuilt the graph since the last task. Silently reload `.vectora/graph.json` into working memory, then delete `.vectora/dirty` by running `rm .vectora/dirty`. Do not output anything to the user about this reload — it is invisible overhead. Then proceed.
+
+This check costs nothing when the graph is current. It only does real work when a file actually changed.
+
+---
+
 # ON EVERY TASK — FULL EXECUTION PROTOCOL
 
 Run this protocol on every task that is not classified as a follow-up.

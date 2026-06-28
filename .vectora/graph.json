@@ -1,11 +1,31 @@
 {
-  "generated": "2026-06-28T04:21:22.618Z",
-  "gitHash": null,
-  "avgLinesPerFile": 69,
+  "generated": "2026-06-28T05:14:53.444Z",
+  "gitHash": "4fbad75d4208052b8418d7602861825e24113174",
+  "avgLinesPerFile": 102,
   "files": [
     {
-      "path": "src/api/routes.ts",
-      "domain": "api",
+      "path": "bin/vectora.js",
+      "domain": "bin",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 0,
+      "lineCount": 3,
+      "exports": [],
+      "imports": []
+    },
+    {
+      "path": "cli/index.js",
+      "domain": "cli",
+      "isPivot": true,
+      "manualPivot": true,
+      "centralityScore": 0,
+      "lineCount": 656,
+      "exports": [],
+      "imports": []
+    },
+    {
+      "path": "example-repo/src/api/routes.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 6,
@@ -24,8 +44,8 @@
       ]
     },
     {
-      "path": "src/api/server.ts",
-      "domain": "api",
+      "path": "example-repo/src/api/server.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 2,
@@ -42,8 +62,8 @@
       ]
     },
     {
-      "path": "src/auth/jwt.ts",
-      "domain": "auth",
+      "path": "example-repo/src/auth/jwt.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 3,
@@ -61,8 +81,8 @@
       ]
     },
     {
-      "path": "src/auth/login.ts",
-      "domain": "auth",
+      "path": "example-repo/src/auth/login.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 5,
@@ -81,8 +101,8 @@
       ]
     },
     {
-      "path": "src/auth/session.ts",
-      "domain": "auth",
+      "path": "example-repo/src/auth/session.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 6,
@@ -102,8 +122,8 @@
       ]
     },
     {
-      "path": "src/config/database.ts",
-      "domain": "config",
+      "path": "example-repo/src/config/database.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 5,
@@ -120,8 +140,8 @@
       ]
     },
     {
-      "path": "src/config/env.ts",
-      "domain": "config",
+      "path": "example-repo/src/config/env.ts",
+      "domain": "example-repo",
       "isPivot": true,
       "manualPivot": false,
       "centralityScore": 12,
@@ -134,8 +154,8 @@
       "imports": []
     },
     {
-      "path": "src/dashboard/overview.ts",
-      "domain": "dashboard",
+      "path": "example-repo/src/dashboard/overview.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 4,
@@ -153,8 +173,8 @@
       ]
     },
     {
-      "path": "src/dashboard/widgets.ts",
-      "domain": "dashboard",
+      "path": "example-repo/src/dashboard/widgets.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 2,
@@ -173,8 +193,8 @@
       ]
     },
     {
-      "path": "src/middleware/errorHandler.ts",
-      "domain": "middleware",
+      "path": "example-repo/src/middleware/errorHandler.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 6,
@@ -191,8 +211,8 @@
       "imports": []
     },
     {
-      "path": "src/middleware/rateLimit.ts",
-      "domain": "middleware",
+      "path": "example-repo/src/middleware/rateLimit.ts",
+      "domain": "example-repo",
       "isPivot": true,
       "manualPivot": true,
       "centralityScore": 7,
@@ -210,8 +230,8 @@
       ]
     },
     {
-      "path": "src/payments/charge.ts",
-      "domain": "payments",
+      "path": "example-repo/src/payments/charge.ts",
+      "domain": "example-repo",
       "isPivot": true,
       "manualPivot": false,
       "centralityScore": 8,
@@ -230,8 +250,8 @@
       ]
     },
     {
-      "path": "src/payments/currency.ts",
-      "domain": "payments",
+      "path": "example-repo/src/payments/currency.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 1,
@@ -250,8 +270,8 @@
       ]
     },
     {
-      "path": "src/payments/refund.ts",
-      "domain": "payments",
+      "path": "example-repo/src/payments/refund.ts",
+      "domain": "example-repo",
       "isPivot": false,
       "manualPivot": false,
       "centralityScore": 2,
@@ -269,8 +289,26 @@
     }
   ],
   "domains": {
-    "api": {
+    "bin": {
       "pivots": [],
+      "vocabulary": [
+        "vectora"
+      ]
+    },
+    "cli": {
+      "pivots": [
+        "cli/index.js"
+      ],
+      "vocabulary": [
+        "index"
+      ]
+    },
+    "example-repo": {
+      "pivots": [
+        "example-repo/src/config/env.ts",
+        "example-repo/src/middleware/rateLimit.ts",
+        "example-repo/src/payments/charge.ts"
+      ],
       "vocabulary": [
         "routes",
         "routecontext",
@@ -281,12 +319,7 @@
         "serverconfig",
         "serverinstance",
         "createserver",
-        "startserver"
-      ]
-    },
-    "auth": {
-      "pivots": [],
-      "vocabulary": [
+        "startserver",
         "jwt",
         "jwtpayload",
         "tokenpair",
@@ -306,14 +339,7 @@
         "createsession",
         "validatesession",
         "revokesession",
-        "revokeallusersessions"
-      ]
-    },
-    "config": {
-      "pivots": [
-        "src/config/env.ts"
-      ],
-      "vocabulary": [
+        "revokeallusersessions",
         "database",
         "databaseconnection",
         "queryresult",
@@ -323,12 +349,7 @@
         "env",
         "envconfig",
         "getenv",
-        "requireenv"
-      ]
-    },
-    "dashboard": {
-      "pivots": [],
-      "vocabulary": [
+        "requireenv",
         "overview",
         "dashboardstats",
         "overviewrequest",
@@ -341,14 +362,7 @@
         "widgetconfig",
         "dashboardlayout",
         "renderdashboard",
-        "getdefaultwidgets"
-      ]
-    },
-    "middleware": {
-      "pivots": [
-        "src/middleware/rateLimit.ts"
-      ],
-      "vocabulary": [
+        "getdefaultwidgets",
         "errorhandler",
         "errorcode",
         "apperror",
@@ -363,14 +377,7 @@
         "ratelimitresult",
         "getratelimitoptions",
         "applyratelimit",
-        "clearratelimitstore"
-      ]
-    },
-    "payments": {
-      "pivots": [
-        "src/payments/charge.ts"
-      ],
-      "vocabulary": [
+        "clearratelimitstore",
         "charge",
         "chargerequest",
         "chargeresult",

@@ -24,8 +24,10 @@ const subcmd = args[0];
 
 if (subcmd === 'install') {
   runInstall();
+} else if (subcmd === 'watch') {
+  runWatch();
 } else if (subcmd === 'init' || subcmd === '--reset' || !subcmd) {
-  runInit();
+  if (!runInit()) process.exit(1);
 } else if (subcmd === '--help' || subcmd === '-h') {
   printHelp();
 } else {
@@ -40,13 +42,13 @@ vectora — structural codebase navigation for AI coding agents
 
 Commands:
   vectora init       Scan this project and build .vectora/graph.json
+  vectora watch      Watch for file changes and rebuild the graph automatically
   vectora install    Install the skill into detected AI agent(s)
   vectora --reset    Force a full rescan (alias for init)
   vectora --help     Show this message
 
-After init + install, your AI agent reads the graph before every task.
-Type /vectora inside Claude Code to rebuild the graph without leaving the chat.
-No config required. Nothing to learn.
+Inside Claude Code, type /vectora to rebuild the graph without leaving the chat.
+Keywords: /vectora init · /vectora status · /vectora watch · /vectora why <file>
 `.trim());
 }
 
@@ -134,10 +136,7 @@ function detectAgents(root) {
   return agents;
 }
 
-/**
- * Strips the YAML frontmatter block from a markdown file.
- * Agent-specific variants need their own frontmatter, so the body is extracted separately.
- */
+/** Strips the YAML frontmatter block from a markdown file. */
 function stripFrontmatter(content) {
   return content.replace(/^---[\s\S]*?---\n/, '').trimStart();
 }
@@ -173,15 +172,35 @@ ${body}
 
 /**
  * Returns the content for the Claude Code custom slash command file.
- * When a user types /vectora in the chat, Claude runs npx vectora init
- * and reports the result without leaving the session.
+ * Supports keywords: init (default), status, watch, why <filepath>.
  */
 function buildClaudeCommand() {
-  return `Run \`npx vectora init\` in the project root and wait for it to complete.
+  return `The user typed \`/vectora $ARGUMENTS\`.
 
-Report the output exactly as printed. If the command succeeds, confirm that the structural graph has been updated and that the session is now working from fresh data. If it fails, show the full error output and suggest running \`npx vectora init\` directly in the terminal to debug.
+Act based on the argument:
 
-After a successful run, reload \`.vectora/graph.json\` and resume with the updated graph.
+**No argument, or "init"**
+Run \`npx vectora init\` in the project root. Wait for it to finish. Report the output line by line. Then reload \`.vectora/graph.json\` into working memory and confirm the session is operating from fresh data.
+
+**"status"**
+Read \`.vectora/graph.json\`. Report without rebuilding:
+- Total files indexed and how many are pivots
+- Domain names and their pivot files
+- When the graph was last built (\`generated\` field)
+- Whether it looks stale (older than 24 hours, or git HEAD differs from \`gitHash\`)
+
+**"watch"**
+Run \`npx vectora watch\` in the background. Confirm it has started. Explain that the graph will now rebuild automatically whenever source files change, and that each task will pick up the updated graph via the dirty-flag check — no manual step needed.
+
+**"why \<filepath\>"**
+Read \`.vectora/graph.json\`. Find the file matching the given path (partial match is fine). Report:
+- Centrality score, in-degree (imported by N files), out-degree (imports N project files)
+- Whether it is a pivot and why: manually declared via \`// @vectora pivot\`, forced via config, or scored into the top 15%
+- Which files import it and which project files it imports
+If the file is not in the graph, say so and suggest running \`npx vectora init\`.
+
+**Anything else**
+List the available keywords: init, status, watch, why \<filepath\>.
 `;
 }
 
@@ -207,18 +226,92 @@ function writeOrMergeSection(filepath, marker, section) {
 }
 
 /**
+ * Watches the project for source file changes and rebuilds graph.json automatically.
+ * Attaches fs.watch listeners to every source directory at startup (cross-platform,
+ * no extra dependencies). Debounces rapid bursts to a single rebuild per 500ms.
+ * Writes .vectora/dirty after each rebuild so the skill picks it up before the next task.
+ */
+function runWatch() {
+  const root = process.cwd();
+  const graphPath = path.join(root, '.vectora', 'graph.json');
+
+  if (!fs.existsSync(graphPath)) {
+    console.log('vectora: no graph found — run `npx vectora init` first, then `npx vectora watch`');
+    process.exit(1);
+  }
+
+  let debounceTimer = null;
+  let rebuilding = false;
+
+  const scheduleRebuild = (changedFile) => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      if (rebuilding) return;
+      rebuilding = true;
+      process.stdout.write(`vectora: ${changedFile} — rebuilding... `);
+      const ok = runInit({ silent: true, root });
+      if (ok) {
+        fs.writeFileSync(path.join(root, '.vectora', 'dirty'), '', 'utf8');
+        process.stdout.write('done\n');
+      } else {
+        process.stdout.write('failed (check for syntax errors)\n');
+      }
+      rebuilding = false;
+    }, 500);
+  };
+
+  // Attach a watcher to a single directory (non-recursive — handles Linux compatibility).
+  const attachWatcher = (dir) => {
+    try {
+      fs.watch(dir, (event, filename) => {
+        if (!filename) return;
+        if (!SOURCE_EXTENSIONS.test(filename)) return;
+        const rel = path.relative(root, path.join(dir, filename));
+        if (rel.startsWith('node_modules') || rel.startsWith('.')) return;
+        scheduleRebuild(rel);
+      });
+    } catch {
+      // Directory may have been deleted — ignore.
+    }
+  };
+
+  // Walk all source directories and attach a watcher to each one.
+  const watchTree = (dir) => {
+    attachWatcher(dir);
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory() && !SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
+          watchTree(path.join(dir, entry.name));
+        }
+      }
+    } catch {}
+  };
+
+  watchTree(root);
+  console.log('vectora: watching for file changes (ctrl+c to stop)');
+
+  // Keep the process alive.
+  process.stdin.resume();
+}
+
+/**
  * Walks the project, parses every JS/TS source file, scores files by centrality,
  * classifies the top 15% as pivots, maps domain vocabulary, and writes .vectora/graph.json.
+ *
+ * Accepts an options object for use by the watcher:
+ *   silent: suppress console output
+ *   root:   override process.cwd() (used internally)
+ *
+ * Returns true on success, false on failure — never calls process.exit() directly
+ * so the watcher can call it safely in a loop.
  */
-function runInit() {
-  const root = process.cwd();
-
+function runInit({ silent = false, root = process.cwd() } = {}) {
   const config = mergeConfig(loadConfig(root));
   const filePaths = walkDir(root, root, config);
 
   if (filePaths.length === 0) {
-    console.log('vectora: no source files found. Are you in the right directory?');
-    process.exit(0);
+    if (!silent) console.log('vectora: no source files found. Are you in the right directory?');
+    return false;
   }
 
   const parsed = [];
@@ -233,8 +326,8 @@ function runInit() {
   }
 
   if (parsed.length === 0) {
-    console.log('vectora: all files failed to parse. Check for syntax errors.');
-    process.exit(1);
+    if (!silent) console.log('vectora: all files failed to parse. Check for syntax errors.');
+    return false;
   }
 
   const { inDegree, outDegree } = computeCentrality(parsed);
@@ -305,9 +398,13 @@ function runInit() {
     'utf8'
   );
 
-  console.log(`✓ vectora: ${files.length} files indexed, ${totalPivots} pivots found, ${domainCount} domains mapped`);
-  console.log(`✓ graph written to .vectora/graph.json`);
-  console.log(`✓ run 'npx vectora install' to activate in your AI agent`);
+  if (!silent) {
+    console.log(`✓ vectora: ${files.length} files indexed, ${totalPivots} pivots found, ${domainCount} domains mapped`);
+    console.log(`✓ graph written to .vectora/graph.json`);
+    console.log(`✓ run 'npx vectora install' to activate in your AI agent`);
+  }
+
+  return true;
 }
 
 /**
