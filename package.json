@@ -1,0 +1,40 @@
+{
+  "name": "vectora",
+  "version": "1.0.0",
+  "description": "Structural codebase navigation for AI coding agents — AST dependency graph + multi-agent skill installer",
+  "bin": {
+    "vectora": "bin/vectora.js"
+  },
+  "main": "cli/index.js",
+  "dependencies": {
+    "@babel/parser": "^7.24.0",
+    "minimatch": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "vectora",
+    "claude",
+    "claude-code",
+    "cursor",
+    "codex",
+    "windsurf",
+    "skill",
+    "agent",
+    "ast",
+    "dependency-graph",
+    "codebase-navigation",
+    "token-efficiency"
+  ],
+  "author": "terranicgerald <signleft66@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/terranicgerald/vectora.git"
+  },
+  "bugs": {
+    "url": "https://github.com/terranicgerald/vectora/issues"
+  },
+  "homepage": "https://github.com/terranicgerald/vectora#readme"
+}

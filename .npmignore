@@ -1,0 +1,7 @@
+example-repo/
+.vectora/
+.claude/
+.cursor/
+*.jsonl
+*.log
+.gitignore

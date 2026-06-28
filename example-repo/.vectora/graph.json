@@ -1,0 +1,397 @@
+{
+  "generated": "2026-06-28T04:55:26.521Z",
+  "gitHash": null,
+  "avgLinesPerFile": 69,
+  "files": [
+    {
+      "path": "src/api/routes.ts",
+      "domain": "api",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 6,
+      "lineCount": 97,
+      "exports": [
+        "RouteContext",
+        "RouteResponse",
+        "handleRequest",
+        "registerRoutes"
+      ],
+      "imports": [
+        "../auth/login",
+        "../payments/charge",
+        "../middleware/rateLimit",
+        "../middleware/errorHandler"
+      ]
+    },
+    {
+      "path": "src/api/server.ts",
+      "domain": "api",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 2,
+      "lineCount": 79,
+      "exports": [
+        "ServerConfig",
+        "ServerInstance",
+        "createServer",
+        "startServer"
+      ],
+      "imports": [
+        "./routes",
+        "../config/env"
+      ]
+    },
+    {
+      "path": "src/auth/jwt.ts",
+      "domain": "auth",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 3,
+      "lineCount": 59,
+      "exports": [
+        "JwtPayload",
+        "TokenPair",
+        "createToken",
+        "createRefreshToken",
+        "verifyToken",
+        "createTokenPair"
+      ],
+      "imports": [
+        "../config/env"
+      ]
+    },
+    {
+      "path": "src/auth/login.ts",
+      "domain": "auth",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 5,
+      "lineCount": 77,
+      "exports": [
+        "LoginRequest",
+        "LoginResult",
+        "RefreshRequest",
+        "login",
+        "refreshTokens"
+      ],
+      "imports": [
+        "./session",
+        "./jwt",
+        "../middleware/rateLimit"
+      ]
+    },
+    {
+      "path": "src/auth/session.ts",
+      "domain": "auth",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 6,
+      "lineCount": 83,
+      "exports": [
+        "SessionData",
+        "CreateSessionParams",
+        "SessionValidation",
+        "createSession",
+        "validateSession",
+        "revokeSession",
+        "revokeAllUserSessions"
+      ],
+      "imports": [
+        "../middleware/rateLimit",
+        "../config/database"
+      ]
+    },
+    {
+      "path": "src/config/database.ts",
+      "domain": "config",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 5,
+      "lineCount": 51,
+      "exports": [
+        "DatabaseConnection",
+        "QueryResult",
+        "getDbConnection",
+        "query",
+        "transaction"
+      ],
+      "imports": [
+        "./env"
+      ]
+    },
+    {
+      "path": "src/config/env.ts",
+      "domain": "config",
+      "isPivot": true,
+      "manualPivot": false,
+      "centralityScore": 12,
+      "lineCount": 28,
+      "exports": [
+        "EnvConfig",
+        "getEnv",
+        "requireEnv"
+      ],
+      "imports": []
+    },
+    {
+      "path": "src/dashboard/overview.ts",
+      "domain": "dashboard",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 4,
+      "lineCount": 62,
+      "exports": [
+        "DashboardStats",
+        "OverviewRequest",
+        "OverviewResult",
+        "getDashboardOverview",
+        "getUserSummary"
+      ],
+      "imports": [
+        "../auth/session",
+        "../payments/charge"
+      ]
+    },
+    {
+      "path": "src/dashboard/widgets.ts",
+      "domain": "dashboard",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 2,
+      "lineCount": 84,
+      "exports": [
+        "WidgetType",
+        "Widget",
+        "WidgetConfig",
+        "DashboardLayout",
+        "renderDashboard",
+        "getDefaultWidgets"
+      ],
+      "imports": [
+        "./overview",
+        "../config/env"
+      ]
+    },
+    {
+      "path": "src/middleware/errorHandler.ts",
+      "domain": "middleware",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 6,
+      "lineCount": 62,
+      "exports": [
+        "ErrorCode",
+        "AppError",
+        "ErrorResponse",
+        "createError",
+        "handleError",
+        "isAppError",
+        "toErrorResponse"
+      ],
+      "imports": []
+    },
+    {
+      "path": "src/middleware/rateLimit.ts",
+      "domain": "middleware",
+      "isPivot": true,
+      "manualPivot": true,
+      "centralityScore": 7,
+      "lineCount": 62,
+      "exports": [
+        "RateLimitOptions",
+        "RateLimitInfo",
+        "RateLimitResult",
+        "getRateLimitOptions",
+        "applyRateLimit",
+        "clearRateLimitStore"
+      ],
+      "imports": [
+        "../config/env"
+      ]
+    },
+    {
+      "path": "src/payments/charge.ts",
+      "domain": "payments",
+      "isPivot": true,
+      "manualPivot": false,
+      "centralityScore": 8,
+      "lineCount": 88,
+      "exports": [
+        "ChargeRequest",
+        "ChargeResult",
+        "ChargeRecord",
+        "processCharge",
+        "getCharge",
+        "listChargesForUser"
+      ],
+      "imports": [
+        "../middleware/errorHandler",
+        "../config/database"
+      ]
+    },
+    {
+      "path": "src/payments/currency.ts",
+      "domain": "payments",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 1,
+      "lineCount": 67,
+      "exports": [
+        "CurrencyCode",
+        "ExchangeRate",
+        "ConversionResult",
+        "getExchangeRate",
+        "convertCurrency",
+        "formatAmount",
+        "isSupportedCurrency"
+      ],
+      "imports": [
+        "../config/env"
+      ]
+    },
+    {
+      "path": "src/payments/refund.ts",
+      "domain": "payments",
+      "isPivot": false,
+      "manualPivot": false,
+      "centralityScore": 2,
+      "lineCount": 67,
+      "exports": [
+        "RefundRequest",
+        "RefundResult",
+        "processRefund",
+        "getRefundableAmount"
+      ],
+      "imports": [
+        "./charge",
+        "../middleware/errorHandler"
+      ]
+    }
+  ],
+  "domains": {
+    "api": {
+      "pivots": [],
+      "vocabulary": [
+        "routes",
+        "routecontext",
+        "routeresponse",
+        "handlerequest",
+        "registerroutes",
+        "server",
+        "serverconfig",
+        "serverinstance",
+        "createserver",
+        "startserver"
+      ]
+    },
+    "auth": {
+      "pivots": [],
+      "vocabulary": [
+        "jwt",
+        "jwtpayload",
+        "tokenpair",
+        "createtoken",
+        "createrefreshtoken",
+        "verifytoken",
+        "createtokenpair",
+        "login",
+        "loginrequest",
+        "loginresult",
+        "refreshrequest",
+        "refreshtokens",
+        "session",
+        "sessiondata",
+        "createsessionparams",
+        "sessionvalidation",
+        "createsession",
+        "validatesession",
+        "revokesession",
+        "revokeallusersessions"
+      ]
+    },
+    "config": {
+      "pivots": [
+        "src/config/env.ts"
+      ],
+      "vocabulary": [
+        "database",
+        "databaseconnection",
+        "queryresult",
+        "getdbconnection",
+        "query",
+        "transaction",
+        "env",
+        "envconfig",
+        "getenv",
+        "requireenv"
+      ]
+    },
+    "dashboard": {
+      "pivots": [],
+      "vocabulary": [
+        "overview",
+        "dashboardstats",
+        "overviewrequest",
+        "overviewresult",
+        "getdashboardoverview",
+        "getusersummary",
+        "widgets",
+        "widgettype",
+        "widget",
+        "widgetconfig",
+        "dashboardlayout",
+        "renderdashboard",
+        "getdefaultwidgets"
+      ]
+    },
+    "middleware": {
+      "pivots": [
+        "src/middleware/rateLimit.ts"
+      ],
+      "vocabulary": [
+        "errorhandler",
+        "errorcode",
+        "apperror",
+        "errorresponse",
+        "createerror",
+        "handleerror",
+        "isapperror",
+        "toerrorresponse",
+        "ratelimit",
+        "ratelimitoptions",
+        "ratelimitinfo",
+        "ratelimitresult",
+        "getratelimitoptions",
+        "applyratelimit",
+        "clearratelimitstore"
+      ]
+    },
+    "payments": {
+      "pivots": [
+        "src/payments/charge.ts"
+      ],
+      "vocabulary": [
+        "charge",
+        "chargerequest",
+        "chargeresult",
+        "chargerecord",
+        "processcharge",
+        "getcharge",
+        "listchargesforuser",
+        "currency",
+        "currencycode",
+        "exchangerate",
+        "conversionresult",
+        "getexchangerate",
+        "convertcurrency",
+        "formatamount",
+        "issupportedcurrency",
+        "refund",
+        "refundrequest",
+        "refundresult",
+        "processrefund",
+        "getrefundableamount"
+      ]
+    }
+  }
+}
