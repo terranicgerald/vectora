@@ -45,6 +45,7 @@ Commands:
   vectora --help     Show this message
 
 After init + install, your AI agent reads the graph before every task.
+Type /vectora inside Claude Code to rebuild the graph without leaving the chat.
 No config required. Nothing to learn.
 `.trim());
 }
@@ -76,10 +77,16 @@ function runInstall() {
 
   for (const agent of detected) {
     if (agent === 'claude') {
-      const dest = path.join(root, '.claude', 'skills', 'vectora', 'SKILL.md');
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, skillContent, 'utf8');
+      const skillDest = path.join(root, '.claude', 'skills', 'vectora', 'SKILL.md');
+      fs.mkdirSync(path.dirname(skillDest), { recursive: true });
+      fs.writeFileSync(skillDest, skillContent, 'utf8');
       console.log(`✓ vectora: installed for Claude Code → .claude/skills/vectora/SKILL.md`);
+
+      const cmdDest = path.join(root, '.claude', 'commands', 'vectora.md');
+      fs.mkdirSync(path.dirname(cmdDest), { recursive: true });
+      fs.writeFileSync(cmdDest, buildClaudeCommand(), 'utf8');
+      console.log(`✓ vectora: registered slash command → .claude/commands/vectora.md`);
+
       installed++;
     }
 
@@ -117,7 +124,10 @@ function runInstall() {
  */
 function detectAgents(root) {
   const agents = [];
-  if (fs.existsSync(path.join(root, '.claude'))) agents.push('claude');
+  if (
+    fs.existsSync(path.join(root, '.claude')) ||
+    fs.existsSync(path.join(root, 'CLAUDE.md'))
+  ) agents.push('claude');
   if (fs.existsSync(path.join(root, '.cursor'))) agents.push('cursor');
   if (fs.existsSync(path.join(root, '.codex'))) agents.push('codex');
   if (fs.existsSync(path.join(root, '.windsurfrules'))) agents.push('windsurf');
@@ -159,6 +169,20 @@ function buildWindsurfSection(body) {
 
 ${body}
 <!-- /vectora -->`;
+}
+
+/**
+ * Returns the content for the Claude Code custom slash command file.
+ * When a user types /vectora in the chat, Claude runs npx vectora init
+ * and reports the result without leaving the session.
+ */
+function buildClaudeCommand() {
+  return `Run \`npx vectora init\` in the project root and wait for it to complete.
+
+Report the output exactly as printed. If the command succeeds, confirm that the structural graph has been updated and that the session is now working from fresh data. If it fails, show the full error output and suggest running \`npx vectora init\` directly in the terminal to debug.
+
+After a successful run, reload \`.vectora/graph.json\` and resume with the updated graph.
+`;
 }
 
 /**

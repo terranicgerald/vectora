@@ -93,8 +93,11 @@ The agent navigates to the right files immediately instead of reading the whole 
 
 None of these are required.
 
+**`/vectora`** (Claude Code only)
+Registered as a native slash command during `npx vectora install`. Type `/vectora` in the Claude Code chat to rebuild the graph and reload it — without leaving the session. Shows up in the command palette with tab-completion.
+
 **`/vectora update`**
-Force a full graph rebuild from inside your AI agent after a major refactor. The agent runs the CLI synchronously and resumes with a fresh graph.
+Skill-level command (works in all agents). Forces a full graph rebuild and reloads the session context.
 
 **`vectora.config.js`** (never created automatically)
 ```js
