@@ -10,6 +10,21 @@ const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', 'coverage',
 ]);
 
+// Directories that are scaffolding/fixtures, not the source the agent navigates.
+// Excluded by default so they don't pollute domains or get classified as pivots.
+const DEFAULT_EXCLUDE_DIRS = new Set([
+  'example-repo', 'examples', 'fixtures', '__fixtures__',
+  '__tests__', '__mocks__', '__snapshots__', 'test', 'tests',
+]);
+
+// Test/story files are skipped by default for the same reason.
+const TEST_FILE_RE = /\.(test|spec|stories)\.(js|jsx|ts|tsx)$/;
+
+// Matches a line whose entire content is the pivot annotation comment.
+// Anchored to line boundaries so a mention inside a string or another comment
+// (e.g. raw.includes(...) in this very file) is NOT treated as a manual pivot.
+const MANUAL_PIVOT_RE = /^[ \t]*\/\/[ \t]*@vectora[ \t]+pivot[ \t]*$/m;
+
 const VALID_CONFIG_FIELDS = new Set([
   'pivotThreshold', 'refreshAfterHours', 'refreshAfterChanges',
   'forcePivots', 'exclude', 'domains',
@@ -19,20 +34,23 @@ const SOURCE_EXTENSIONS = /\.(js|jsx|ts|tsx)$/;
 
 const SKILL_SRC = path.join(__dirname, '..', 'skill', 'SKILL.src.md');
 
-const args = process.argv.slice(2);
-const subcmd = args[0];
+/** Parses argv and dispatches to the matching subcommand. */
+function main() {
+  const args = process.argv.slice(2);
+  const subcmd = args[0];
 
-if (subcmd === 'install') {
-  runInstall();
-} else if (subcmd === 'watch') {
-  runWatch();
-} else if (subcmd === 'init' || subcmd === '--reset' || !subcmd) {
-  if (!runInit()) process.exit(1);
-} else if (subcmd === '--help' || subcmd === '-h') {
-  printHelp();
-} else {
-  console.error(`vectora: unknown command "${subcmd}". Run vectora --help.`);
-  process.exit(1);
+  if (subcmd === 'install') {
+    runInstall();
+  } else if (subcmd === 'watch') {
+    runWatch();
+  } else if (subcmd === 'init' || subcmd === '--reset' || !subcmd) {
+    if (!runInit()) process.exit(1);
+  } else if (subcmd === '--help' || subcmd === '-h') {
+    printHelp();
+  } else {
+    console.error(`vectora: unknown command "${subcmd}". Run vectora --help.`);
+    process.exit(1);
+  }
 }
 
 /** Prints usage to stdout. */
@@ -113,6 +131,30 @@ function runInstall() {
       console.log(`✓ vectora: installed for Windsurf → .windsurfrules`);
       installed++;
     }
+
+    if (agent === 'kiro') {
+      const dest = path.join(root, '.kiro', 'rules', 'vectora.md');
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buildKiroVariant(skillBody), 'utf8');
+      console.log(`✓ vectora: installed for Kiro → .kiro/rules/vectora.md`);
+      installed++;
+    }
+
+    if (agent === 'opencode') {
+      const dest = path.join(root, '.opencode', 'rules', 'vectora.md');
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buildOpenCodeVariant(skillBody), 'utf8');
+      console.log(`✓ vectora: installed for OpenCode → .opencode/rules/vectora.md`);
+      installed++;
+    }
+
+    if (agent === 'gemini') {
+      const dest = path.join(root, '.gemini', 'skills', 'vectora', 'SKILL.md');
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buildGeminiVariant(skillBody), 'utf8');
+      console.log(`✓ vectora: installed for Gemini CLI → .gemini/skills/vectora/SKILL.md`);
+      installed++;
+    }
   }
 
   console.log('');
@@ -133,6 +175,9 @@ function detectAgents(root) {
   if (fs.existsSync(path.join(root, '.cursor'))) agents.push('cursor');
   if (fs.existsSync(path.join(root, '.codex'))) agents.push('codex');
   if (fs.existsSync(path.join(root, '.windsurfrules'))) agents.push('windsurf');
+  if (fs.existsSync(path.join(root, '.kiro'))) agents.push('kiro');
+  if (fs.existsSync(path.join(root, '.opencode'))) agents.push('opencode');
+  if (fs.existsSync(path.join(root, '.gemini'))) agents.push('gemini');
   return agents;
 }
 
@@ -168,6 +213,33 @@ function buildWindsurfSection(body) {
 
 ${body}
 <!-- /vectora -->`;
+}
+
+/** Wraps the skill body in Kiro's .md rule format. */
+function buildKiroVariant(body) {
+  return `---
+description: Structural codebase navigation — vectora reads dependency graph before every task
+globs: ""
+alwaysApply: false
+---
+
+${body}`;
+}
+
+/** Wraps the skill body in OpenCode's rule format (identical shape to Kiro). */
+function buildOpenCodeVariant(body) {
+  return `---
+description: Structural codebase navigation — vectora reads dependency graph before every task
+globs: ""
+alwaysApply: false
+---
+
+${body}`;
+}
+
+/** Returns the skill body as plain markdown for Gemini CLI (no frontmatter needed). */
+function buildGeminiVariant(body) {
+  return body;
 }
 
 /**
@@ -396,6 +468,18 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
   const totalPivots = files.filter(f => f.isPivot).length;
   const domainCount = Object.keys(domains).length;
 
+  // Warn when the graph looks degenerate: almost all files have zero centrality.
+  // This typically means only CJS files were found and the previous ESM-only
+  // pass produced no edges. A degenerate graph is written (for partial value)
+  // but the user is warned so they know navigation quality is reduced.
+  const nonZero = scored.filter(f => f.centralityScore > 0).length;
+  if (!silent && nonZero === 0 && scored.length > 1) {
+    console.warn(`vectora: ⚠ all ${scored.length} files scored zero centrality — imports may not have resolved.`);
+    console.warn(`vectora: check for unsupported patterns (path aliases, dynamic imports).`);
+  } else if (!silent && nonZero < scored.length * 0.1 && scored.length > 5) {
+    console.warn(`vectora: ⚠ only ${nonZero}/${scored.length} files have import edges — graph may be partial.`);
+  }
+
   const graph = {
     generated: new Date().toISOString(),
     gitHash: getGitHash(root),
@@ -473,9 +557,11 @@ function walkDir(dir, root, config, results = []) {
     const relative = path.relative(root, fullPath);
 
     if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      if (SKIP_DIRS.has(entry.name) || DEFAULT_EXCLUDE_DIRS.has(entry.name)) continue;
+      if (entry.name.startsWith('.')) continue;
       walkDir(fullPath, root, config, results);
     } else if (entry.isFile() && SOURCE_EXTENSIONS.test(entry.name)) {
+      if (TEST_FILE_RE.test(entry.name)) continue;
       if (isExcluded(relative, config.exclude)) continue;
       results.push(fullPath);
     }
@@ -495,6 +581,24 @@ function isExcluded(relative, patterns) {
 }
 
 /**
+ * Depth-first AST visitor. Calls fn(node) for every node in the tree.
+ * Used so CJS patterns nested inside function bodies are still detected.
+ */
+function walkAst(node, fn) {
+  if (!node || typeof node !== 'object') return;
+  fn(node);
+  for (const key of Object.keys(node)) {
+    if (key === 'type' || key === 'loc' || key === 'start' || key === 'end') continue;
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const c of child) walkAst(c, fn);
+    } else if (child && typeof child === 'object' && child.type) {
+      walkAst(child, fn);
+    }
+  }
+}
+
+/**
  * Parses a single source file via Babel's AST.
  * Returns the import sources, exported names, line count, and whether
  * the file carries a manual pivot annotation. Returns null on parse failure.
@@ -508,7 +612,7 @@ function parseFile(filepath) {
     return null;
   }
 
-  const manualPivot = raw.includes('// @vectora pivot');
+  const manualPivot = MANUAL_PIVOT_RE.test(raw);
   const lineCount = raw.split('\n').length;
 
   let ast;
@@ -532,30 +636,84 @@ function parseFile(filepath) {
   const imports = [];
   const exports = [];
 
-  for (const node of ast.program.body) {
+  // Walk the full AST to catch both ESM and CommonJS patterns.
+  walkAst(ast.program, (node) => {
+    // ESM: import 'source'
     if (node.type === 'ImportDeclaration') {
       imports.push(node.source.value);
-    } else if (node.type === 'ExportNamedDeclaration') {
-      if (node.specifiers && node.specifiers.length > 0) {
-        for (const spec of node.specifiers) {
-          const name = spec.exported?.name;
-          if (name) exports.push(name);
-        }
+      return;
+    }
+
+    // ESM: export { a, b } or export function/class/const
+    if (node.type === 'ExportNamedDeclaration') {
+      for (const spec of node.specifiers ?? []) {
+        const name = spec.exported?.name;
+        if (name) exports.push(name);
       }
       if (node.declaration) {
         const decl = node.declaration;
-        if (decl.id?.name) {
-          exports.push(decl.id.name);
-        } else if (decl.declarations) {
-          for (const d of decl.declarations) {
-            if (d.id?.name) exports.push(d.id.name);
-          }
+        if (decl.id?.name) exports.push(decl.id.name);
+        for (const d of decl.declarations ?? []) {
+          if (d.id?.name) exports.push(d.id.name);
         }
       }
-    } else if (node.type === 'ExportDefaultDeclaration') {
-      exports.push(node.declaration?.id?.name || 'default');
+      return;
     }
-  }
+
+    // ESM: export default
+    if (node.type === 'ExportDefaultDeclaration') {
+      exports.push(node.declaration?.id?.name || 'default');
+      return;
+    }
+
+    // CJS: require('source') — anywhere in the tree
+    if (
+      node.type === 'CallExpression' &&
+      node.callee?.name === 'require' &&
+      node.arguments?.[0]?.type === 'StringLiteral'
+    ) {
+      imports.push(node.arguments[0].value);
+      return;
+    }
+
+    // CJS: module.exports = { a, b } or module.exports.name = ...
+    if (
+      node.type === 'AssignmentExpression' &&
+      node.left?.type === 'MemberExpression'
+    ) {
+      const obj = node.left.object;
+      const prop = node.left.property;
+
+      // module.exports.name = value  →  export 'name'
+      if (
+        obj?.type === 'MemberExpression' &&
+        obj.object?.name === 'module' &&
+        obj.property?.name === 'exports' &&
+        prop?.name
+      ) {
+        exports.push(prop.name);
+        return;
+      }
+
+      // module.exports = { key: val, ... }
+      if (
+        obj?.name === 'module' &&
+        prop?.name === 'exports' &&
+        node.right?.type === 'ObjectExpression'
+      ) {
+        for (const p of node.right.properties ?? []) {
+          const key = p.key?.name || p.key?.value;
+          if (key) exports.push(key);
+        }
+        return;
+      }
+
+      // exports.name = value
+      if (obj?.name === 'exports' && prop?.name) {
+        exports.push(prop.name);
+      }
+    }
+  });
 
   return { manualPivot, lineCount, imports, exports };
 }
@@ -570,11 +728,16 @@ function resolveImport(importer, importSource, allPaths) {
   const dir = path.dirname(importer);
   const resolved = path.resolve(dir, importSource);
 
+  // Exact match first — handles CJS require('./foo.js') with explicit extension.
+  if (allPaths.has(resolved)) return resolved;
+
+  // Try appending extensions (ESM bare specifiers, TypeScript imports).
   for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
     const candidate = resolved + ext;
     if (allPaths.has(candidate)) return candidate;
   }
 
+  // Try index file variants (directory imports).
   for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
     const candidate = path.join(resolved, 'index') + ext;
     if (allPaths.has(candidate)) return candidate;
@@ -666,3 +829,27 @@ function getGitHash(root) {
     return null;
   }
 }
+
+// Exported for tests and for bin/vectora.js. The CLI only auto-runs when this
+// file is the program entry point — requiring it (tests, bin shim) does not.
+module.exports = {
+  main,
+  runInit,
+  parseFile,
+  computeCentrality,
+  inferDomain,
+  buildVocabulary,
+  resolveImport,
+  walkDir,
+  mergeConfig,
+  buildKiroVariant,
+  buildOpenCodeVariant,
+  buildGeminiVariant,
+  buildCursorVariant,
+  buildAgentsMdSection,
+  buildWindsurfSection,
+  stripFrontmatter,
+  detectAgents,
+};
+
+if (require.main === module) main();

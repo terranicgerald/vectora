@@ -1,8 +1,7 @@
 ---
-name: vectora
-version: 1.0.0
-license: MIT
-description: Structural codebase navigation. Reads a pre-built AST dependency graph before navigating source files. Handles single tasks, multi-domain tasks, and chained prompts. Detects follow-ups. Active when a task involves reading or modifying source code.
+description: Structural codebase navigation — vectora reads dependency graph before every task
+globs: ""
+alwaysApply: false
 ---
 
 # ACTIVATION

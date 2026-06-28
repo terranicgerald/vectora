@@ -1,11 +1,15 @@
 {
   "name": "vectora",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Structural codebase navigation for AI coding agents — AST dependency graph + multi-agent skill installer",
   "bin": {
     "vectora": "bin/vectora.js"
   },
   "main": "cli/index.js",
+  "scripts": {
+    "postinstall": "node postinstall.js",
+    "test": "node tests/index.test.js"
+  },
   "dependencies": {
     "@babel/parser": "^7.24.0",
     "minimatch": "^9.0.0"

@@ -1,7 +1,12 @@
 example-repo/
 .vectora/
+tests/
 .claude/
 .cursor/
+.kiro/
+.opencode/
+.gemini/
 *.jsonl
 *.log
 .gitignore
+ROADMAP.md

@@ -2,24 +2,22 @@
 name: vectora
 version: 1.0.0
 license: MIT
-description: Structural codebase navigation. Reads a pre-built AST dependency graph before every task. Handles single tasks, multi-domain tasks, and chained prompts. Detects follow-ups. Active every session, unconditionally.
+description: Structural codebase navigation. Reads a pre-built AST dependency graph before navigating source files. Handles single tasks, multi-domain tasks, and chained prompts. Detects follow-ups. Active when a task involves reading or modifying source code.
 ---
 
 # ACTIVATION
 
-Active on every task in every session, without exception. No slash command, keyword, or trigger required — responds to any message that describes work to be done: a change, a bug report, a question about the codebase, or a new feature.
+Active when a task involves reading or modifying source files — a code change, a bug, a refactor, a new feature, a question about how something works. **Not** active for tasks that don't touch source code: writing commit messages, answering conceptual questions, formatting prose, summarising output.
+
+When active, read `.vectora/graph.json` first, select the right pivots and domain, then load files. The banner appears once per task where vectora actually influenced which files were selected.
+
+When not active, proceed normally — no banner, no graph read, no session log write.
 
 ---
 
 # CONSTRAINT
 
-Do not open, read, or reference any source file until:
-  (a) `.vectora/graph.json` has been read, AND
-  (b) the task decomposition and coordination plan have been written to `.vectora/session.log`.
-
-Both conditions must be satisfied before loading any source file.
-
-Skipping this step is the failure mode vectora is designed to eliminate: loading files you don't need, burning tokens on orientation, losing the thread mid-task when a prompt crosses domain boundaries.
+Before loading any source file: read `.vectora/graph.json` and identify the pivot files for the matched domain. Use the graph to guide file selection — but **reading is not prohibited**. If a skeletonized file turns out to contain the code you need, open it. Log the full-load in `session.log` with a one-sentence reason. Skeletons are a hint, not a wall.
 
 ---
 
@@ -331,9 +329,8 @@ The activation banner is the **first output** of every response to a task — be
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ domain:    <matched domain(s)>                        │
-│ pivots:    <filenames, ✦ if manualPivot>              │
+│ loaded:    <N> pivots                                 │
 │ skipped:   <N> files → skeletonized                   │
-│ est. save: ~<calculated> tokens vs unguided           │
 ╚───────────────────────────────────────────────────────╝
 ```
 
@@ -341,9 +338,8 @@ The activation banner is the **first output** of every response to a task — be
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ domain:    fallback (all pivots loaded)               │
-│ pivots:    <all pivot filenames across all domains>   │
+│ loaded:    <N> pivots                                 │
 │ skipped:   <N> files → skeletonized                   │
-│ est. save: ~<calculated> tokens vs unguided           │
 ╚───────────────────────────────────────────────────────╝
 ```
 
@@ -354,16 +350,14 @@ The activation banner is the **first output** of every response to a task — be
 │ shared pivots: <filenames, ✦ if manualPivot> → once     │
 │                                                         │
 │ [1/<N>] domain: <name>                                  │
-│         pivots: <domain-specific filenames>             │
-│         skipped: <N> files → skeletonized               │
+│         loaded:   <N> pivots                            │
+│         skipped:  <N> files → skeletonized              │
 │                                                         │
 │ [2/<N>] domain: <name>                                  │
-│         pivots: <domain-specific filenames>             │
-│         skipped: <N> files → skeletonized               │
+│         loaded:   <N> pivots                            │
+│         skipped:  <N> files → skeletonized              │
 │                                                         │
 │ (repeat per sub-task)                                   │
-│                                                         │
-│ est. save: ~<total tokens across all sub-tasks>         │
 ╚─────────────────────────────────────────────────────────╝
 ```
 
@@ -372,9 +366,8 @@ The activation banner is the **first output** of every response to a task — be
 ╔─ vectora ─────────────────────────────────────────────╗
 │ ↺ graph refreshed — <N> files, <P> pivots, <D> domains│
 │ domain:    <matched domain(s)>                        │
-│ pivots:    <filenames, ✦ if manualPivot>              │
+│ loaded:    <N> pivots                                 │
 │ skipped:   <N> files → skeletonized                   │
-│ est. save: ~<calculated> tokens vs unguided           │
 ╚───────────────────────────────────────────────────────╝
 ```
 
@@ -382,9 +375,8 @@ The activation banner is the **first output** of every response to a task — be
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ ↩ follow-up to: <domain> [turn <N>]                  │
-│ context:  inherited — no reload needed                │
-│ pivots:   <previously loaded pivot filenames>         │
-│ est. save: ~<tokens saved vs full reload>             │
+│ context:   inherited — no reload needed               │
+│ loaded:    <previously loaded pivot filenames>        │
 ╚───────────────────────────────────────────────────────╝
 ```
 
@@ -406,34 +398,9 @@ Every non-pivot file in the matched domain is represented in this format. Three 
 // Imports: <comma-separated import sources>
 ```
 
-Skeletons are synthesized directly from the `exports` and `imports` arrays already stored in `graph.json`. Do not open the source file to generate a skeleton — the data is already in the graph. Opening the file defeats the purpose and wastes the tokens you are trying to save.
+Skeletons are synthesized from the `exports` and `imports` arrays in `graph.json` — no file open needed. Use `lineCount` from `graph.json` for the header.
 
-Use `lineCount` from `graph.json` for the line count in the skeleton header.
-
-If you need the full source during execution: open it and log the reason in `session.log`.
-
----
-
-# TOKEN ESTIMATE FORMULA
-
-For each sub-task (or the single task):
-```
-est_save = skeletonized_count × (avgLinesPerFile - 3) × 4
-```
-
-`avgLinesPerFile` comes from `graph.json`. Each skeletonized file costs 3 lines instead of `avgLinesPerFile` lines. Multiply by 4 chars/token. Sum across all sub-tasks for the chained banner total.
-
----
-
-# ON SESSION END
-
-As the final line of the final response in the session, append:
-
-```
-// vectora: <P> pivots in full, <S> skeletonized, <R> full-loads, <C> sub-tasks executed
-```
-
-For single-task sessions: `<C>` = 1. For follow-up sessions: include follow-ups in the sub-task count.
+If the skeleton is insufficient and you need the real body: open the file and log the reason in `session.log`. Skeletons are a starting point, not a prohibition.
 
 ---
 
