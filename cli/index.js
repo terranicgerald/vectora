@@ -172,35 +172,48 @@ ${body}
 
 /**
  * Returns the content for the Claude Code custom slash command file.
+ * The command wires into the vectora skill protocol — it does not bypass it.
  * Supports keywords: init (default), status, watch, why <filepath>.
  */
 function buildClaudeCommand() {
-  return `The user typed \`/vectora $ARGUMENTS\`.
+  return `You are handling a \`/vectora $ARGUMENTS\` command. This command is part of the vectora skill — follow the full skill protocol, do not shortcut it.
 
-Act based on the argument:
+**Entry sequence (required before any keyword logic):**
+1. Run the PER-TASK REFRESH CHECK: attempt to read \`.vectora/dirty\`. If present, reload \`.vectora/graph.json\` and delete the file. If absent, proceed with the graph already in memory.
+2. Confirm \`.vectora/graph.json\` is in working memory. If it was cleared, read it now.
 
-**No argument, or "init"**
-Run \`npx vectora init\` in the project root. Wait for it to finish. Report the output line by line. Then reload \`.vectora/graph.json\` into working memory and confirm the session is operating from fresh data.
+**Then act on the keyword in $ARGUMENTS:**
+
+**No argument or "init"**
+Follow the \`/vectora init\` protocol from the vectora skill:
+- Output: \`↺ vectora: rebuilding graph...\`
+- Run \`npx vectora init\` and wait for completion
+- Output the CLI lines exactly as printed
+- Reload \`.vectora/graph.json\` using your file-reading tool
+- Output: \`Graph refreshed. Session context updated. Ready.\`
+- Set postUpdateBanner = true for the next task
+- Append to \`.vectora/session.log\`: \`<timestamp> /vectora init: graph rebuilt\`
 
 **"status"**
-Read \`.vectora/graph.json\`. Report without rebuilding:
-- Total files indexed and how many are pivots
-- Domain names and their pivot files
-- When the graph was last built (\`generated\` field)
-- Whether it looks stale (older than 24 hours, or git HEAD differs from \`gitHash\`)
+Follow the \`/vectora status\` protocol from the vectora skill:
+- Output the status banner (files, pivots, domains, built timestamp, git hash, stale flag)
+- Do not rebuild
+- Append to \`.vectora/session.log\`: \`<timestamp> /vectora status\`
 
 **"watch"**
-Run \`npx vectora watch\` in the background. Confirm it has started. Explain that the graph will now rebuild automatically whenever source files change, and that each task will pick up the updated graph via the dirty-flag check — no manual step needed.
+Follow the \`/vectora watch\` protocol from the vectora skill:
+- Run \`npx vectora watch\` in the background
+- Confirm it started and explain the dirty-flag mechanism
+- Append to \`.vectora/session.log\`: \`<timestamp> /vectora watch: watcher started\`
 
-**"why \<filepath\>"**
-Read \`.vectora/graph.json\`. Find the file matching the given path (partial match is fine). Report:
-- Centrality score, in-degree (imported by N files), out-degree (imports N project files)
-- Whether it is a pivot and why: manually declared via \`// @vectora pivot\`, forced via config, or scored into the top 15%
-- Which files import it and which project files it imports
-If the file is not in the graph, say so and suggest running \`npx vectora init\`.
+**"why <filepath>"**
+Follow the \`/vectora why\` protocol from the vectora skill:
+- Find the file in \`.vectora/graph.json\` (partial path match is fine)
+- Output the why banner (centrality score, in/out degree, pivot reason, import relationships)
+- Append to \`.vectora/session.log\`: \`<timestamp> /vectora why: <filepath>\`
 
-**Anything else**
-List the available keywords: init, status, watch, why \<filepath\>.
+**Unknown keyword**
+List the available keywords: \`init\`, \`status\`, \`watch\`, \`why <filepath>\`.
 `;
 }
 

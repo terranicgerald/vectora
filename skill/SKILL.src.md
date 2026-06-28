@@ -56,17 +56,92 @@ Do not stop if `graph.json` is absent. Degrade gracefully.
 
 ---
 
-# SLASH COMMAND: /vectora update
+# SLASH COMMANDS: /vectora [keyword]
 
-When the user types `/vectora update`:
+All `/vectora` commands follow the same entry sequence before executing:
+
+1. Run the PER-TASK REFRESH CHECK (read `.vectora/dirty` — if present, reload `graph.json` and delete it).
+2. Confirm `graph.json` is loaded in working memory. If not, read it now.
+3. Execute the command for the given keyword.
+4. Append the appropriate entry to `.vectora/session.log`.
+
+---
+
+## /vectora  or  /vectora init
+
+Rebuild the graph and reload it into the session.
 
 1. Output: `↺ vectora: rebuilding graph...`
-2. Run: `npx vectora init --reset` (synchronously — wait for full completion)
-3. Use your file-reading tool to reload `.vectora/graph.json`.
-4. Output the three CLI confirmation lines exactly as printed.
+2. Run: `npx vectora init` (synchronously — wait for full completion).
+3. Output the CLI lines exactly as printed.
+4. Use your file-reading tool to reload `.vectora/graph.json` into working memory.
 5. Output: `Graph refreshed. Session context updated. Ready.`
 6. Set internal flag: `postUpdateBanner = true` — the next task uses the post-update banner format.
-7. Resume normal operation.
+7. Append to `.vectora/session.log`: `<timestamp> /vectora init: graph rebuilt`
+
+---
+
+## /vectora status
+
+Show the current graph state. No rebuild.
+
+1. Read `.vectora/graph.json` (already in memory — do not re-open unless memory was cleared).
+2. Output:
+```
+╔─ vectora status ──────────────────────────────────────╗
+│ files:     <total count>                              │
+│ pivots:    <pivot count> (<pivot %>  of codebase)     │
+│ domains:   <domain names>                             │
+│ built:     <generated timestamp>                      │
+│ git:       <gitHash, first 8 chars, or "no git">      │
+│ stale:     <yes / no — based on age + git hash check> │
+╚───────────────────────────────────────────────────────╝
+```
+3. Append to `.vectora/session.log`: `<timestamp> /vectora status`
+
+Staleness: flag as stale if `generated` is older than `refreshAfterHours` OR if current git HEAD differs from `gitHash`.
+
+---
+
+## /vectora watch
+
+Start the background file watcher.
+
+1. Run: `npx vectora watch` (in the background — do not block the session).
+2. Output: `↺ vectora: watcher started — graph will rebuild automatically on file changes.`
+3. Explain: the watcher writes `.vectora/dirty` after each rebuild; the PER-TASK REFRESH CHECK picks it up before the next task at zero cost when nothing has changed.
+4. Append to `.vectora/session.log`: `<timestamp> /vectora watch: watcher started`
+
+---
+
+## /vectora why \<filepath\>
+
+Explain why a file is or is not a pivot.
+
+1. Read `.vectora/graph.json` (already in memory).
+2. Find the file entry matching the given path (partial match is fine — match the closest).
+3. Output:
+```
+╔─ vectora why: <filepath> ─────────────────────────────╗
+│ centrality:  <score> (in: <inDegree>, out: <outDegree>)│
+│ pivot:       <yes / no>                               │
+│ reason:      <scored top 15% / manual @vectora pivot / forced via config / not a pivot> │
+│ imported by: <files that import this one, or "none">  │
+│ imports:     <project files this one imports, or "none"> │
+╚───────────────────────────────────────────────────────╝
+```
+4. If the file is not in the graph, say so and suggest running `npx vectora init`.
+5. Append to `.vectora/session.log`: `<timestamp> /vectora why: <filepath>`
+
+---
+
+## /vectora \<unknown keyword\>
+
+List the available keywords and their purpose:
+- `init` — rebuild graph
+- `status` — show graph stats without rebuilding
+- `watch` — start background file watcher
+- `why <filepath>` — explain pivot classification for a file
 
 ---
 
