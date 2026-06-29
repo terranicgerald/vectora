@@ -456,6 +456,7 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
     manualPivot: f.manualPivot || forcePivotSet.has(f.fullPath),
     centralityScore: f.centralityScore,
     lineCount: f.lineCount,
+    charCount: f.charCount,
     exports: f.exports,
     imports: f.imports,
   }));
@@ -720,7 +721,7 @@ function parseFile(filepath) {
     }
   });
 
-  return { manualPivot, lineCount, imports, exports };
+  return { manualPivot, lineCount, charCount: raw.length, imports, exports };
 }
 
 /**
