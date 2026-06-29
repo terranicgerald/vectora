@@ -872,6 +872,31 @@ function runBrief(task) {
     scores[name] = matches / vocab.length;
   }
 
+  // Path matching: scan task for explicit file references and boost their domain.
+  // Handles tasks like "rewrite concept bodies in phase3/r01.ts" where the file
+  // path is the clearest signal but its tokens don't appear in domain vocabulary.
+  const rawWords = task.split(/\s+/);
+  for (const word of rawWords) {
+    const clean = word.replace(/^['"(]+|['"(),;]+$/g, '');
+    if (!clean.includes('/') && !/\.(ts|tsx|js|jsx)$/.test(clean)) continue;
+    for (const f of files) {
+      if (f.path === clean || f.path.endsWith('/' + clean) || f.path.includes(clean)) {
+        scores[f.domain] = (scores[f.domain] || 0) + 0.5;
+      }
+    }
+  }
+
+  // Domain name matching: if any task token directly matches a domain name,
+  // boost that domain so it wins over unrelated vocabulary matches.
+  for (const name of Object.keys(domains)) {
+    for (const t of tokenize(name)) {
+      if (taskTokens.has(t)) {
+        scores[name] = (scores[name] || 0) + 0.3;
+        break;
+      }
+    }
+  }
+
   const entries = Object.entries(scores).sort((a, b) => b[1] - a[1]);
   const best = entries[0]?.[1] ?? 0;
 
