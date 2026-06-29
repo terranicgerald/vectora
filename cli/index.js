@@ -498,7 +498,7 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
   if (!silent) {
     console.log(`✓ vectora: ${files.length} files indexed, ${totalPivots} pivots found, ${domainCount} domains mapped`);
     console.log(`✓ graph written to .vectora/graph.json`);
-    console.log(`✓ run 'npx vectora install' to activate in your AI agent`);
+    console.log(`✓ graph ready — type /vectora help in your AI agent to get started`);
   }
 
   return true;

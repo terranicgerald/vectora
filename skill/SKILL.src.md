@@ -65,6 +65,24 @@ All `/vectora` commands follow the same entry sequence before executing:
 
 ---
 
+## /vectora prompt \<task\>
+
+Explicitly invoke vectora navigation for a task. The command comes first; the task description follows. This is the **recommended pairing pattern** — the activation banner confirms vectora is actively navigating.
+
+Examples:
+- `/vectora prompt Fix the login timeout bug`
+- `/vectora prompt Add rate limiting to the payments API`
+- `/vectora prompt Refactor auth, then update the dashboard`
+
+1. Extract everything after `/vectora prompt ` as the task content.
+2. Confirm `.vectora/graph.json` is loaded in working memory. If not, read it now — do NOT rebuild.
+3. Output the activation banner **first**, before any explanation or code.
+4. Run the full execution protocol (Phases 1–4) on the extracted task content.
+5. Do NOT run `npx vectora init`. Do NOT rebuild the graph.
+6. Append to `.vectora/session.log`: `<timestamp> prompt: <first 60 chars of task>`
+
+---
+
 ## /vectora  or  /vectora init
 
 Rebuild the graph and reload it into the session.
@@ -76,6 +94,7 @@ Rebuild the graph and reload it into the session.
 5. Output: `Graph refreshed. Session context updated. Ready.`
 6. Set internal flag: `postUpdateBanner = true` — the next task uses the post-update banner format.
 7. Append to `.vectora/session.log`: `<timestamp> /vectora init: graph rebuilt`
+8. Check `.vectora/session.log` for any prior entries. If this is the **first ever init** (log has only this one entry or was just created), automatically run the `/vectora help` output below so the user knows what to do next.
 
 ---
 
@@ -133,13 +152,41 @@ Explain why a file is or is not a pivot.
 
 ---
 
-## /vectora \<unknown keyword\>
+## /vectora help  or  /vectora \<unknown keyword\>
 
-List the available keywords and their purpose:
-- `init` — rebuild graph
-- `status` — show graph stats without rebuilding
-- `watch` — start background file watcher
-- `why <filepath>` — explain pivot classification for a file
+Output the onboarding guide:
+
+```
+╔─ vectora help ─────────────────────────────────────────────────────────╗
+│                                                                        │
+│  Your codebase is indexed. Vectora is active.                          │
+│                                                                        │
+│  HOW IT WORKS                                                          │
+│  Vectora reads .vectora/graph.json before every coding task.           │
+│  It identifies pivot files (high-centrality entry points) and          │
+│  skeletonizes the rest — so only the files that matter are loaded.     │
+│                                                                        │
+│  THE PAIRING PATTERN (recommended)                                     │
+│  Use /vectora prompt <task> to explicitly invoke navigation.           │
+│  The activation banner appears first — that's your proof it worked.   │
+│                                                                        │
+│    /vectora prompt Fix the login timeout bug                           │
+│    /vectora prompt Add rate limiting to the payments API               │
+│    /vectora prompt Refactor auth, then update the dashboard            │
+│                                                                        │
+│  Vectora matches the task to a domain, loads pivot files, and          │
+│  skeletonizes everything else before writing a single line of code.    │
+│                                                                        │
+│  COMMANDS                                                              │
+│    /vectora prompt <task>  navigate & execute a task explicitly        │
+│    /vectora init       rebuild graph (run after big refactors)         │
+│    /vectora status     show indexed file count, pivots, domains        │
+│    /vectora watch      auto-rebuild graph in background on file changes│
+│    /vectora why <f>    explain why a file is or isn't a pivot          │
+│    /vectora help       show this message                               │
+│                                                                        │
+╚────────────────────────────────────────────────────────────────────────╝
+```
 
 ---
 
