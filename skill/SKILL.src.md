@@ -122,10 +122,11 @@ Rebuild the graph and reload it into the session.
 
 ## /vectora status
 
-Show the current graph state. No rebuild.
+Show the current graph state and session savings. No rebuild.
 
 1. Read `.vectora/graph.json` (already in memory — do not re-open unless memory was cleared).
-2. Output:
+2. Read `.vectora/session.log` — sum all `saved=<N>L` values to get session total. Count task entries for task count.
+3. Output:
 ```
 ╔─ vectora status ──────────────────────────────────────╗
 │ files:     <total count>                              │
@@ -134,9 +135,10 @@ Show the current graph state. No rebuild.
 │ built:     <generated timestamp>                      │
 │ git:       <gitHash, first 8 chars, or "no git">      │
 │ stale:     <yes / no — based on age + git hash check> │
+│ session:   <session_total> lines saved across <N> tasks│
 ╚───────────────────────────────────────────────────────╝
 ```
-3. Append to `.vectora/session.log`: `<timestamp> /vectora status`
+4. Append to `.vectora/session.log`: `<timestamp> /vectora status`
 
 Staleness: flag as stale if `generated` is older than `refreshAfterHours` OR if current git HEAD differs from `gitHash`.
 
@@ -402,7 +404,13 @@ Output the **single-task banner** (see below).
 1. Load pivot files in full using your file-reading tool.
 2. Inject skeletons for non-pivot files in the matched domain (see SKELETON FORMAT — synthesized from graph.json data, not by opening the files).
 3. Execute the task completely.
-4. Append to `.vectora/session.log`: `<timestamp> single task: complete`
+4. Compute savings from graph.json data (all values are exact — no estimation):
+   - `pivot_lines` = sum of `lineCount` for each pivot file loaded this task
+   - `lines_saved` = sum of `(file.lineCount - 3)` for each skeletonized file (3 = skeleton size)
+   - `session_total` = sum of all `saved=` values already in `.vectora/session.log`
+5. Append to `.vectora/session.log`: `<timestamp> single task: complete · savings: loaded=<pivot_lines>L pivot_files=<N> saved=<lines_saved>L skeleton_files=<S>`
+6. Output the closing savings line as the **final line** of the response:
+   `─ vectora: <lines_saved> lines saved this task · session: <session_total + lines_saved> lines saved ─`
 
 **Chained task:**
 1. Load all shared pivots in full. Do not load any sub-task-specific pivots yet.
@@ -413,13 +421,17 @@ Output the **single-task banner** (see below).
    d. Append to `.vectora/session.log`: `<timestamp> chain[<N>]: complete`
    e. Do not reload files already in context when moving between sub-tasks.
 3. After all sub-tasks complete:
-   Append to `.vectora/session.log`: `<timestamp> chain: all <N> sub-tasks complete`
+   - Compute savings across all sub-tasks combined (sum pivot_lines, sum lines_saved).
+   - `session_total` = sum of all `saved=` values already in `.vectora/session.log`
+   - Append to `.vectora/session.log`: `<timestamp> chain: all <N> sub-tasks complete · savings: loaded=<total_pivot_lines>L saved=<total_lines_saved>L`
+   - Output closing savings line: `─ vectora: <total_lines_saved> lines saved this task · session: <session_total + total_lines_saved> lines saved ─`
 
 **Full-load requests (any task type):**
 If you determine you need the full source of a skeletonized file:
 - Open it using your file-reading tool.
 - Append to `.vectora/session.log`:
   `<timestamp> full-load: <filepath> — <one-sentence reason> [sub-task <N> or single]`
+- Adjust the savings count: the full-loaded file no longer counts as skeletonized.
 
 **Context reorientation:**
 If at any point during chained execution you lose track of which sub-task is active or which files are in scope: re-read `.vectora/session.log`. The log is the source of truth.
@@ -434,17 +446,19 @@ The activation banner is the **first output** of every response to a task — be
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ domain:    <matched domain(s)>                        │
-│ loaded:    <N> pivots                                 │
-│ skipped:   <N> files → skeletonized                   │
+│ loaded:    <N> pivots (<pivot_lines> lines)           │
+│ skipped:   <N> files → skeletonized (<lines_saved> lines saved) │
 ╚───────────────────────────────────────────────────────╝
 ```
+
+`pivot_lines` and `lines_saved` come directly from `lineCount` in `graph.json` — exact values, not estimates.
 
 ## Single-task banner (fallback — no domain matched):
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ domain:    fallback (all pivots loaded)               │
-│ loaded:    <N> pivots                                 │
-│ skipped:   <N> files → skeletonized                   │
+│ loaded:    <N> pivots (<pivot_lines> lines)           │
+│ skipped:   <N> files → skeletonized (<lines_saved> lines saved) │
 ╚───────────────────────────────────────────────────────╝
 ```
 
@@ -455,12 +469,12 @@ The activation banner is the **first output** of every response to a task — be
 │ shared pivots: <filenames, ✦ if manualPivot> → once     │
 │                                                         │
 │ [1/<N>] domain: <name>                                  │
-│         loaded:   <N> pivots                            │
-│         skipped:  <N> files → skeletonized              │
+│         loaded:   <N> pivots (<pivot_lines> lines)      │
+│         skipped:  <N> files → skeletonized (<lines_saved> lines saved) │
 │                                                         │
 │ [2/<N>] domain: <name>                                  │
-│         loaded:   <N> pivots                            │
-│         skipped:  <N> files → skeletonized              │
+│         loaded:   <N> pivots (<pivot_lines> lines)      │
+│         skipped:  <N> files → skeletonized (<lines_saved> lines saved) │
 │                                                         │
 │ (repeat per sub-task)                                   │
 ╚─────────────────────────────────────────────────────────╝
@@ -471,8 +485,8 @@ The activation banner is the **first output** of every response to a task — be
 ╔─ vectora ─────────────────────────────────────────────╗
 │ ↺ graph refreshed — <N> files, <P> pivots, <D> domains│
 │ domain:    <matched domain(s)>                        │
-│ loaded:    <N> pivots                                 │
-│ skipped:   <N> files → skeletonized                   │
+│ loaded:    <N> pivots (<pivot_lines> lines)           │
+│ skipped:   <N> files → skeletonized (<lines_saved> lines saved) │
 ╚───────────────────────────────────────────────────────╝
 ```
 

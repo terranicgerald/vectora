@@ -39,19 +39,43 @@ The graph stores the current git HEAD hash. The skill checks for staleness at se
 
 ---
 
+## Skeletonization
+
+Non-pivot files are never opened. Instead, vectora synthesizes a 3-line skeleton from the pre-built graph and injects it directly into the agent's context:
+
+```
+// src/utils/formatters.js [142 lines — skeleton only]
+// Exports: formatDate, formatCurrency, formatPhone
+// Imports: dayjs, lodash
+```
+
+That 142-line file costs 3 lines of context instead of 142. The agent knows what it exports, what it depends on, and where to find it — without reading it.
+
+For a task touching one domain in a 50-file codebase:
+- 3 pivot files loaded in full: 412 lines
+- 12 non-pivot files skeletonized: 36 lines (instead of 1,800)
+- Lines saved: **1,764** — shown at the end of every task response
+
+If a skeleton turns out to be insufficient, the agent opens the file and logs why. Skeletons are a starting point, not a prohibition.
+
+---
+
 ## What you see — single task
 
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
 │ domain:    auth                                       │
-│ pivots:    env.ts, rateLimit.ts ✦                   │
-│ skipped:   9 files → skeletonized                    │
-│ est. save: ~3,840 tokens vs unguided                 │
+│ loaded:    2 pivots (412 lines)                       │
+│ skipped:   9 files → skeletonized (2,847 lines saved) │
 ╚───────────────────────────────────────────────────────╝
-  ✦ manually declared via @vectora pivot
 ```
 
-Pivot files loaded in full. 9 files reduced to 3-line skeletons — synthesized from graph data, not opened. The agent navigates directly to the right place.
+At the end of the response:
+```
+─ vectora: 2,847 lines saved this task · session: 2,847 lines saved ─
+```
+
+Line counts come directly from `lineCount` in `graph.json` — exact values, not estimates.
 
 ---
 
@@ -63,20 +87,23 @@ Pivot files loaded in full. 9 files reduced to 3-line skeletons — synthesized 
 │ shared pivots: env.ts, rateLimit.ts ✦ → once           │
 │                                                         │
 │ [1/3] domain: auth                                      │
-│        pivots: login.ts, jwt.ts                         │
-│        skipped: 5 files → skeletonized                  │
+│        loaded:  2 pivots (280 lines)                    │
+│        skipped: 5 files → skeletonized (1,240 lines saved) │
 │                                                         │
 │ [2/3] domain: payments                                  │
-│        pivots: charge.ts                                │
-│        skipped: 4 files → skeletonized                  │
+│        loaded:  1 pivot (132 lines)                     │
+│        skipped: 4 files → skeletonized (890 lines saved)│
 │                                                         │
 │ [3/3] domain: dashboard                                 │
-│        pivots: overview.ts                              │
-│        skipped: 3 files → skeletonized                  │
+│        loaded:  1 pivot (98 lines)                      │
+│        skipped: 3 files → skeletonized (620 lines saved)│
 │                                                         │
-│ est. save: ~7,680 tokens vs unguided                    │
 ╚─────────────────────────────────────────────────────────╝
   ✦ manually declared via @vectora pivot
+```
+
+```
+─ vectora: 2,750 lines saved this task · session: 5,597 lines saved ─
 ```
 
 When a prompt spans multiple domains, vectora decomposes it, loads each domain's context separately, and executes in order — without flooding context or losing the thread mid-task.
@@ -85,7 +112,7 @@ When a prompt spans multiple domains, vectora decomposes it, loads each domain's
 
 ## What changes
 
-The agent navigates to the right files immediately instead of reading the whole codebase for orientation. Files outside the relevant domain cost 3 lines instead of hundreds. Chained prompts execute cleanly across domains without context bleeding between them. The graph stays current via git hash comparison. The session summary at the end of every response shows exactly what loaded and what ran.
+The agent navigates to the right files immediately instead of reading the whole codebase for orientation. Files outside the relevant domain cost 3 lines instead of their full source. Chained prompts execute cleanly across domains without context bleeding between them. The graph stays current via git hash comparison. The exact number of lines saved is shown at the end of every response — pulled directly from the graph, not estimated. `/vectora status` shows the cumulative total for the session.
 
 ---
 
