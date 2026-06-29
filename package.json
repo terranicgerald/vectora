@@ -1,6 +1,6 @@
 {
   "name": "vectora",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Structural codebase navigation for AI coding agents — AST dependency graph + multi-agent skill installer",
   "keywords": [
     "vectora",
