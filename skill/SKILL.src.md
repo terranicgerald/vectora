@@ -91,10 +91,18 @@ Rebuild the graph and reload it into the session.
 2. Run: `npx vectora init` (synchronously — wait for full completion).
 3. Output the CLI lines exactly as printed.
 4. Use your file-reading tool to reload `.vectora/graph.json` into working memory.
-5. Output: `Graph refreshed. Session context updated. Ready.`
-6. Set internal flag: `postUpdateBanner = true` — the next task uses the post-update banner format.
-7. Append to `.vectora/session.log`: `<timestamp> /vectora init: graph rebuilt`
-8. Check `.vectora/session.log` for any prior entries. If this is the **first ever init** (log has only this one entry or was just created), automatically run the `/vectora help` output below so the user knows what to do next.
+5. Output the post-init banner immediately, reading values from the freshly loaded graph:
+```
+╔─ vectora ─────────────────────────────────────────────╗
+│ ↺ graph rebuilt                                       │
+│ files:     <total file count>                         │
+│ pivots:    <pivot count> (<pivot% of codebase>)       │
+│ domains:   <comma-separated domain names>             │
+│ built:     <generated timestamp>                      │
+╚───────────────────────────────────────────────────────╝
+```
+6. Append to `.vectora/session.log`: `<timestamp> /vectora init: graph rebuilt`
+7. Check `.vectora/session.log` for any prior entries. If this is the **first ever init** (log has only this one entry or was just created), automatically output the `/vectora help` dialog below so the user knows what to do next.
 
 ---
 
