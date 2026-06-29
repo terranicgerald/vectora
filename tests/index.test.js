@@ -7,10 +7,14 @@ const assert = require('assert');
 
 const {
   parseFile,
+  scoreFile,
+  selectFiles,
+  detectChain,
   computeCentrality,
   inferDomain,
   buildVocabulary,
   resolveImport,
+  tokenize,
   mergeConfig,
   runInit,
   buildKiroVariant,
@@ -314,6 +318,222 @@ module.exports = { manualPivot };
   }
 
   rmTmp(installDir);
+}
+
+// ---------------------------------------------------------------------------
+// tokenize
+// ---------------------------------------------------------------------------
+
+{
+  assert.deepStrictEqual(tokenize('camelCase'), ['camel', 'case'], 'splits camelCase');
+  assert.deepStrictEqual(tokenize('snake_case'), ['snake', 'case'], 'splits snake_case');
+  assert.deepStrictEqual(tokenize('JWT'), ['jwt'], 'lowercases all tokens');
+  assert.ok(!tokenize('io').includes('io'), '2-char token filtered out');
+  assert.ok(tokenize('authentication').includes('authentication'), 'long token passes through');
+  assert.strictEqual(tokenize('').length, 0, 'empty string → empty array');
+  assert.strictEqual(tokenize(null).length, 0, 'null → empty array');
+}
+
+// ---------------------------------------------------------------------------
+// scoreFile — the core scoring pipeline
+// ---------------------------------------------------------------------------
+
+function mkFile(overrides) {
+  return {
+    path: 'src/util.ts',
+    exports: [],
+    isPivot: false,
+    packageSignals: [],
+    allIdentifiers: [],
+    stringLiterals: [],
+    commentTerms: [],
+    charCount: 400,
+    ...overrides,
+  };
+}
+
+{
+  // Signal 1a: exact path in task → score >= 1.0
+  const f = mkFile({ path: 'src/auth/login.ts' });
+  const task = 'Fix src/auth/login.ts token handling';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  assert.ok(score >= 1.0, `exact path match: expected >= 1.0, got ${score}`);
+}
+
+{
+  // Signal 1b: filename match → score >= 0.8
+  const f = mkFile({ path: 'src/auth/login.ts' });
+  const task = 'Fix the login.ts file';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  assert.ok(score >= 0.8, `filename match: expected >= 0.8, got ${score}`);
+}
+
+{
+  // Signal 2: stem token overlap — "charge" in task, file stem is "charge"
+  const f = mkFile({ path: 'src/payments/charge.ts' });
+  const task = 'fix the charge logic';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  // stem='charge', 1 hit / 1 token → 0.5 + dir overlap for 'payments'... 'payments' not in task
+  assert.ok(score >= 0.4, `stem token overlap: expected >= 0.4, got ${score}`);
+}
+
+{
+  // Signal 3: export name overlap
+  const f = mkFile({ path: 'src/payments/invoice.ts', exports: ['processRefund', 'cancelRefund'] });
+  const task = 'test the refund flow';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  assert.ok(score > 0, `export overlap: expected > 0, got ${score}`);
+}
+
+{
+  // Signal 4: directory segment in task → score from dir overlap
+  const f = mkFile({ path: 'src/auth/session.ts' });
+  const task = 'debug auth session handling';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  assert.ok(score > 0.1, `dir segment overlap: expected > 0.1, got ${score}`);
+}
+
+{
+  // Signal 9: pivot bonus adds exactly 0.05 to an otherwise identical file
+  const base  = mkFile({ path: 'src/index.ts', isPivot: false });
+  const pivot = mkFile({ path: 'src/index.ts', isPivot: true });
+  const task = 'refactor the index module';
+  const tokens = new Set(tokenize(task));
+  const lower  = task.toLowerCase();
+  const diff = scoreFile(pivot, tokens, lower) - scoreFile(base, tokens, lower);
+  assert.ok(Math.abs(diff - 0.05) < 0.001, `pivot bonus: expected 0.05, got ${diff}`);
+}
+
+{
+  // Completely unrelated file scores 0
+  const f = mkFile({ path: 'src/database/migrate.ts', exports: ['runMigration'], allIdentifiers: ['migrate', 'rollback'] });
+  const task = 'fix jwt expiry';
+  const score = scoreFile(f, new Set(tokenize(task)), task.toLowerCase());
+  assert.strictEqual(score, 0, `unrelated file: expected 0, got ${score}`);
+}
+
+// ---------------------------------------------------------------------------
+// selectFiles — token budget and threshold logic
+// ---------------------------------------------------------------------------
+
+function mkScored(filePath, score, charCount = 400) {
+  return { path: filePath, _score: score, charCount, exports: [], imports: [], isPivot: false, isBarrel: false, semanticEdges: [] };
+}
+
+{
+  // High-score file → fullLoadFiles; low-score file → skeletonFiles
+  const scored = [
+    mkScored('src/auth/login.ts', 1.5, 400),
+    mkScored('src/utils.ts', 0.05, 200),
+  ];
+  const { fullLoadFiles, skeletonFiles } = selectFiles(scored, 2000);
+  assert.ok(fullLoadFiles.some(f => f.path === 'src/auth/login.ts'), 'high-score file in fullLoadFiles');
+  assert.ok(skeletonFiles.some(f => f.path === 'src/utils.ts'), 'low-score file in skeletonFiles');
+}
+
+{
+  // Token budget cap: file with 80k chars (20k tokens) exceeds 2k budget → excluded from fullLoad
+  const scored = [
+    mkScored('src/giant.ts', 1.5, 80000),
+    mkScored('src/small.ts', 0.8, 400),
+  ];
+  const { fullLoadFiles } = selectFiles(scored, 2000);
+  assert.ok(!fullLoadFiles.some(f => f.path === 'src/giant.ts'), 'oversized file excluded by token budget');
+  assert.ok(fullLoadFiles.some(f => f.path === 'src/small.ts'), 'small file included within budget');
+}
+
+{
+  // Returns the correct shape with all three fields
+  const scored = [mkScored('src/index.ts', 1.0, 200)];
+  const result = selectFiles(scored, 2000);
+  assert.ok('fullLoadFiles' in result, 'result has fullLoadFiles');
+  assert.ok('skeletonFiles' in result, 'result has skeletonFiles');
+  assert.ok('budgetUsed' in result, 'result has budgetUsed');
+  assert.ok(typeof result.budgetUsed === 'number', 'budgetUsed is a number');
+}
+
+{
+  // Fallback: when all files score 0, some files are still loaded
+  const scored = [
+    mkScored('src/a.ts', 0, 100),
+    mkScored('src/b.ts', 0, 100),
+  ];
+  const { fullLoadFiles } = selectFiles(scored, 2000);
+  assert.ok(fullLoadFiles.length > 0, 'fallback: files loaded when all score 0');
+}
+
+// ---------------------------------------------------------------------------
+// buildVocabulary — TF-IDF domain term selection
+// ---------------------------------------------------------------------------
+
+{
+  // Domain-distinctive terms appear in vocabulary
+  const authFiles = [
+    { packageSignals: ['jwt'], allIdentifiers: ['verifyToken', 'hashPassword', 'refreshToken'],
+      stringLiterals: [], commentTerms: [], exports: ['login'], path: 'src/auth/login.ts' },
+  ];
+  const vocab = buildVocabulary(authFiles, null);
+  assert.ok(Array.isArray(vocab), 'vocabulary is an array');
+  assert.ok(vocab.length <= 60, 'vocabulary has at most 60 terms');
+  assert.ok(vocab.includes('jwt'), '"jwt" appears in auth vocabulary');
+  assert.ok(vocab.includes('verify') || vocab.includes('verifytoken') || vocab.some(t => t.includes('verify')), '"verify*" term in auth vocabulary');
+}
+
+{
+  // Short identifiers (< 3 chars) are filtered by addTerms; packageSignals bypass that check.
+  // Test only the identifier path here.
+  const files = [
+    { packageSignals: [], allIdentifiers: ['db', 'id', 'authentication'],
+      stringLiterals: [], commentTerms: [], exports: [], path: 'src/util.ts' },
+  ];
+  const vocab = buildVocabulary(files, null);
+  assert.ok(!vocab.includes('db'), '2-char identifier "db" excluded from vocabulary');
+  assert.ok(!vocab.includes('id'), '2-char identifier "id" excluded from vocabulary');
+  assert.ok(vocab.includes('authentication'), 'long identifier "authentication" included');
+}
+
+{
+  // TF-IDF: term present in only one domain ranks higher than a cross-domain term
+  const authFiles = [
+    { packageSignals: ['jwt'], allIdentifiers: ['jwtSign'], stringLiterals: [], commentTerms: [], exports: [], path: 'src/auth/jwt.ts' },
+  ];
+  const payFiles = [
+    { packageSignals: ['stripe'], allIdentifiers: ['stripePay', 'jwt'], stringLiterals: [], commentTerms: [], exports: [], path: 'src/pay/charge.ts' },
+  ];
+  const allDomains = { auth: authFiles, payments: payFiles };
+  const authVocab = buildVocabulary(authFiles, allDomains);
+  // 'jwt' is in both domains → IDF is lower; should still appear but is ranked lower
+  // 'jwtsign' is auth-only → IDF is higher → should appear
+  assert.ok(authVocab.includes('jwt'), 'cross-domain term "jwt" still in vocabulary');
+  const jwtRank = authVocab.indexOf('jwt');
+  const jwtSignRank = authVocab.indexOf('jwtsign');
+  if (jwtSignRank !== -1) {
+    assert.ok(jwtSignRank <= jwtRank, 'domain-exclusive term ranks before cross-domain term');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// detectChain
+// ---------------------------------------------------------------------------
+
+{
+  // ", then" is the canonical chain separator
+  const parts = detectChain('Fix the login bug, then add rate limiting');
+  assert.ok(Array.isArray(parts) && parts.length === 2, 'detectChain splits on ", then"');
+  assert.ok(parts[0].toLowerCase().includes('login'), `first sub-task is about login, got: "${parts[0]}"`);
+  assert.ok(parts[1].toLowerCase().includes('rate'), `second sub-task is about rate, got: "${parts[1]}"`);
+}
+
+{
+  // Single task → null (no chain)
+  const result = detectChain('Fix the login bug');
+  assert.strictEqual(result, null, 'single task returns null from detectChain');
+}
+
+{
+  // "and then" also triggers
+  const parts = detectChain('Refactor the auth module and then update the tests');
+  assert.ok(Array.isArray(parts) && parts.length >= 2, 'detectChain splits on "and then"');
 }
 
 console.log('All tests passed.');

@@ -1,559 +1,237 @@
 ---
 name: vectora
-version: 1.0.0
+version: 2.0.0
 license: MIT
-description: Structural codebase navigation. Reads a pre-built AST dependency graph before navigating source files. Handles single tasks, multi-domain tasks, and chained prompts. Detects follow-ups. Active when a task involves reading or modifying source code.
+description: CLI-driven structural navigation. Calls npx vectora brief before every coding task. Embeds the start banner in brief output — agent emits it verbatim. Tracks session savings in working memory.
 ---
 
-# WHEN A CONTEXT BRIEF IS PRESENT IN YOUR PROMPT
+# WHEN A VECTORA BRIEF IS PRESENT IN YOUR PROMPT
 
-If your prompt contains a `[VECTORA CONTEXT BRIEF]` block, this takes priority over normal file-loading behavior:
+If your prompt contains a `[VECTORA BRIEF]` block (injected by a parent agent or the CLI):
 
-1. Read the brief before doing anything else.
-2. Load all files listed under "LOAD IN FULL" using your file-reading tool. These are the high-centrality pivot files — they are the entry points for the task.
-3. For files listed under "SKELETON ONLY": use the summary line as-is. Do **not** open these files unless the skeleton is insufficient to complete the task — if you do open one, note why.
-4. Do not speculatively open files not mentioned in the brief.
-5. If you spawn further sub-agents for coding tasks: follow the PROPAGATION instruction in the brief — prepend this brief (or a task-scoped subset of it) to their prompts.
-
-This section applies even when the vectora skill is not otherwise installed. The brief is self-contained.
+1. Emit the banner block (the `╔─...─╝` section) verbatim as the **first lines** of your response.
+2. Load every file listed under `LOAD IN FULL` using your file-reading tool.
+3. For every line under `SKELETON ONLY`: inject it verbatim into context — do **not** open the file unless the skeleton is insufficient to complete the task.
+4. Read the `skeleton_pool:` value. Use it to compute task savings at the end.
+5. If the brief contains an `INSTITUTIONAL MEMORY (Must follow):` section, you MUST adhere to all listed rules during the task.
+6. Do not open files not listed in the brief without logging the reason.
+7. For sub-agents on coding tasks: propagate this brief (or a task-scoped subset) to their prompts.
 
 ---
 
 # ACTIVATION
 
-Active when a task involves reading or modifying source files — a code change, a bug, a refactor, a new feature, a question about how something works. **Not** active for tasks that don't touch source code: writing commit messages, answering conceptual questions, formatting prose, summarising output.
+Active when a task involves reading or modifying source code: bug fixes, features, refactors, questions about how code works. **Not** active for: commit messages, answering conceptual questions, writing prose, pure CLI tasks.
 
-When active, read `.vectora/graph.json` first, select the right pivots and domain, then load files. The banner appears once per task where vectora actually influenced which files were selected.
-
-When not active, proceed normally — no banner, no graph read, no session log write.
+**On first activation in a session:** set `session_total = 0` in working memory.
 
 ---
 
-# CONSTRAINT
+# ON EVERY CODING TASK (not a follow-up)
 
-Before loading any source file: read `.vectora/graph.json` and identify the pivot files for the matched domain. Use the graph to guide file selection — but **reading is not prohibited**. If a skeletonized file turns out to contain the code you need, open it. Log the full-load in `session.log` with a one-sentence reason. Skeletons are a hint, not a wall.
+Before opening any source file or writing any code:
 
----
+1. Run: `npx vectora brief "<full task description>"`
+2. **Emit the banner block (the `╔─...─╝` section) from the brief output verbatim as the first lines of your response.** Do not reformat or paraphrase it.
+3. Load every file listed under `LOAD IN FULL` using your file-reading tool.
+4. Inject every `SKELETON ONLY` line verbatim into your context — do **not** open those files.
+5. Execute the task completely.
+6. If a skeleton file proves insufficient: open it, note the reason inline, and subtract its saved-token value (shown in the skeleton line) from the `skeleton_pool` value before computing savings.
+7. Compute: `task_savings = skeleton_pool_value − tokens_of_any_opened_skeletons`
+8. Update: `session_total += task_savings`
+9. Output as the **final line** of your response:
+   `─ vectora: ~<task_savings> tokens saved this task · session: ~<session_total> tokens saved ─`
 
-# BOOTSTRAP MODE (graph absent)
-
-Before anything else, attempt to open `.vectora/graph.json`. If the file doesn't exist:
-
-**Case A — No source files present** (new or empty project):
-Output this banner and proceed normally. No graph is needed for greenfield work.
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ mode:      planning (no source files yet)             │
-│ tip:       run `npx vectora init` after first files   │
-╚───────────────────────────────────────────────────────╝
-```
-After generating the initial files, remind the user: "Run `npx vectora init` to activate structural navigation."
-
-**Case B — Source files exist but graph is absent**:
-List the top-level project directory. If `.js`, `.ts`, `.jsx`, or `.tsx` files are present anywhere, output:
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ ⚠ no graph — run `npx vectora init` to activate      │
-│ mode:      degraded (folder-structure inference only) │
-╚───────────────────────────────────────────────────────╝
-```
-Then do a lightweight bootstrap:
-1. List top-level directories to identify approximate domain folders (`src/auth`, `src/payments`, etc.)
-2. Read `package.json` if present for project context
-3. Use folder names as approximate domain labels
-4. Proceed — rough domain awareness is better than none
-5. After completing the task, remind: "Run `npx vectora init` to unlock full structural navigation."
-
-Do not stop if `graph.json` is absent. Degrade gracefully.
+If `npx vectora brief` fails or the graph is absent: see BOOTSTRAP MODE below.
 
 ---
 
-# SLASH COMMANDS: /vectora [keyword]
+# /vectora prompt \<task\>
 
-All `/vectora` commands follow the same entry sequence before executing:
-
-1. Run the PER-TASK REFRESH CHECK (read `.vectora/dirty` — if present, reload `graph.json` and delete it).
-2. Confirm `graph.json` is loaded in working memory. If not, read it now.
-3. Execute the command for the given keyword.
-4. Append the appropriate entry to `.vectora/session.log`.
-
----
-
-## /vectora prompt \<task\>
-
-Explicitly invoke vectora navigation for a task. The command comes first; the task description follows. This is the **recommended pairing pattern** — the activation banner confirms vectora is actively navigating.
+**The recommended explicit invocation.** Everything after `prompt` is the task description. The start banner confirms vectora is actively navigating.
 
 Examples:
 - `/vectora prompt Fix the login timeout bug`
 - `/vectora prompt Add rate limiting to the payments API`
 - `/vectora prompt Refactor auth, then update the dashboard`
 
-1. Extract everything after `/vectora prompt ` as the task content.
-2. Confirm `.vectora/graph.json` is loaded in working memory. If not, read it now — do NOT rebuild.
-3. Output the activation banner **first**, before any explanation or code.
-4. Run the full execution protocol (Phases 1–4) on the extracted task content.
-5. Do NOT run `npx vectora init`. Do NOT rebuild the graph.
-6. Append to `.vectora/session.log`: `<timestamp> prompt: <first 60 chars of task>`
-
----
-
-## /vectora  or  /vectora init
-
-Rebuild the graph and reload it into the session.
-
-1. Output: `↺ vectora: rebuilding graph...`
-2. Run: `npx vectora init` (synchronously — wait for full completion).
-3. Output the CLI lines exactly as printed.
-4. Use your file-reading tool to reload `.vectora/graph.json` into working memory.
-5. Output the post-init banner immediately, reading values from the freshly loaded graph:
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ ↺ graph rebuilt                                       │
-│ files:     <total file count>                         │
-│ pivots:    <pivot count> (<pivot% of codebase>)       │
-│ domains:   <comma-separated domain names>             │
-│ built:     <generated timestamp>                      │
-╚───────────────────────────────────────────────────────╝
-```
-6. Append to `.vectora/session.log`: `<timestamp> /vectora init: graph rebuilt`
-7. Check `.vectora/session.log` for any prior entries. If this is the **first ever init** (log has only this one entry or was just created), automatically output the `/vectora help` dialog below so the user knows what to do next.
-
----
-
-## /vectora status
-
-Show the current graph state and session savings. No rebuild.
-
-1. Read `.vectora/graph.json` (already in memory — do not re-open unless memory was cleared).
-2. Read `.vectora/session.log` — sum all `saved=<N>tok` values to get session total. Count task entries for task count.
-3. Output:
-```
-╔─ vectora status ──────────────────────────────────────╗
-│ files:     <total count>                              │
-│ pivots:    <pivot count> (<pivot %>  of codebase)     │
-│ domains:   <domain names>                             │
-│ built:     <generated timestamp>                      │
-│ git:       <gitHash, first 8 chars, or "no git">      │
-│ stale:     <yes / no — based on age + git hash check> │
-│ session:   ~<session_total> tokens saved across <N> tasks│
-╚───────────────────────────────────────────────────────╝
-```
-4. Append to `.vectora/session.log`: `<timestamp> /vectora status`
-
-Staleness: flag as stale if `generated` is older than `refreshAfterHours` OR if current git HEAD differs from `gitHash`.
-
----
-
-## /vectora watch
-
-Start the background file watcher.
-
-1. Run: `npx vectora watch` (in the background — do not block the session).
-2. Output: `↺ vectora: watcher started — graph will rebuild automatically on file changes.`
-3. Explain: the watcher writes `.vectora/dirty` after each rebuild; the PER-TASK REFRESH CHECK picks it up before the next task at zero cost when nothing has changed.
-4. Append to `.vectora/session.log`: `<timestamp> /vectora watch: watcher started`
-
----
-
-## /vectora why \<filepath\>
-
-Explain why a file is or is not a pivot.
-
-1. Read `.vectora/graph.json` (already in memory).
-2. Find the file entry matching the given path (partial match is fine — match the closest).
-3. Output:
-```
-╔─ vectora why: <filepath> ─────────────────────────────╗
-│ centrality:  <score> (in: <inDegree>, out: <outDegree>)│
-│ pivot:       <yes / no>                               │
-│ reason:      <scored top 15% / manual @vectora pivot / forced via config / not a pivot> │
-│ imported by: <files that import this one, or "none">  │
-│ imports:     <project files this one imports, or "none"> │
-╚───────────────────────────────────────────────────────╝
-```
-4. If the file is not in the graph, say so and suggest running `npx vectora init`.
-5. Append to `.vectora/session.log`: `<timestamp> /vectora why: <filepath>`
-
----
-
-## /vectora help  or  /vectora \<unknown keyword\>
-
-Output the onboarding guide:
-
-```
-╔─ vectora help ─────────────────────────────────────────────────────────╗
-│                                                                        │
-│  Your codebase is indexed. Vectora is active.                          │
-│                                                                        │
-│  HOW IT WORKS                                                          │
-│  Vectora reads .vectora/graph.json before every coding task.           │
-│  It identifies pivot files (high-centrality entry points) and          │
-│  skeletonizes the rest — so only the files that matter are loaded.     │
-│                                                                        │
-│  THE PAIRING PATTERN (recommended)                                     │
-│  Use /vectora prompt <task> to explicitly invoke navigation.           │
-│  The activation banner appears first — that's your proof it worked.   │
-│                                                                        │
-│    /vectora prompt Fix the login timeout bug                           │
-│    /vectora prompt Add rate limiting to the payments API               │
-│    /vectora prompt Refactor auth, then update the dashboard            │
-│                                                                        │
-│  Vectora matches the task to a domain, loads pivot files, and          │
-│  skeletonizes everything else before writing a single line of code.    │
-│                                                                        │
-│  COMMANDS                                                              │
-│    /vectora prompt <task>  navigate & execute a task explicitly        │
-│    /vectora init       rebuild graph (run after big refactors)         │
-│    /vectora status     show indexed file count, pivots, domains        │
-│    /vectora watch      auto-rebuild graph in background on file changes│
-│    /vectora why <f>    explain why a file is or isn't a pivot          │
-│    /vectora help       show this message                               │
-│                                                                        │
-╚────────────────────────────────────────────────────────────────────────╝
-```
-
----
-
-# BEFORE SPAWNING SUB-AGENTS
-
-Run this before every Agent tool call whose task involves reading or modifying source files.
-
-**What counts as a coding sub-task:** the prompt mentions file paths, bugs, refactors, features, components, APIs, tests, or specific source symbols.  
-**Skip for:** research, writing, summarization, external API calls, non-code tool use.
-
-**Step 1 — Generate a context brief for each sub-task:**
-
-Run `npx vectora brief "<sub-task description>"` and capture the full stdout output. This is the context brief.
-
-- For **parallel spawns** (multiple Agent calls in one message): run a separate `npx vectora brief "<task-N>"` for each sub-task before constructing any of the Agent tool calls. Each sub-task may match a different domain and needs its own brief.
-- Brief generation is **read-only** — never run `npx vectora init` here.
-
-**Step 2 — Inject the brief into the Agent prompt:**
-
-Prepend the captured brief verbatim before the original sub-agent instructions:
-
-```
-[VECTORA CONTEXT BRIEF]
-...output from npx vectora brief...
-[END VECTORA CONTEXT BRIEF]
-
-<original sub-agent prompt>
-```
-
-**Step 3 — Graph absent fallback:**
-
-If `npx vectora brief` exits with a non-zero code (graph.json missing), inject this line at the top of the sub-agent prompt instead:
-
-```
-Note: vectora graph not available — load source files by best judgment.
-```
-
----
-
-# ON SESSION START
-
-Run once at the beginning of every session, before handling any task.
-
-**Step 1** — Use your file-reading tool to open `.vectora/graph.json`.
-- File absent → enter BOOTSTRAP MODE above. Do not continue with the normal protocol.
-- File present → continue.
-
-**Step 2** — Read from `graph.json`:
-- `generated` (ISO timestamp)
-- `gitHash` (SHA or null)
-- `avgLinesPerFile` (used in the token estimate formula)
-- Load the full `domains` object and all `files` entries into working memory.
-
-**Step 3** — Load config overrides from `vectora.config.js` if present:
-- `refreshAfterHours` (default: 24)
-- `refreshAfterChanges` (default: 10)
-- If the file is absent or a field is missing, use the defaults.
-
-**Step 4** — Staleness check:
-- If `generated` is older than `refreshAfterHours`: run `npx vectora init` silently (no output to user). Reload `graph.json`.
-- If `gitHash` differs from current HEAD AND the changed file count exceeds `refreshAfterChanges`: run `npx vectora init` silently. Reload `graph.json`.
-- If git is unavailable: timestamp check only.
-- If neither condition is met: proceed with the existing `graph.json`.
-
-**Step 5** — Do not load any source files. Working memory now holds the graph — session start is complete.
+Protocol:
+1. Extract everything after `/vectora prompt ` as the task.
+2. Run `npx vectora brief "<task>"`.
+3. Emit the banner block from the brief verbatim as the **first lines** of your response.
+4. Load `LOAD IN FULL` files. Inject `SKELETON ONLY` lines. Execute completely.
+5. Compute savings from `skeleton_pool`. Update `session_total`.
+6. Output the end savings line as the final line.
 
 ---
 
 # FOLLOW-UP DETECTION
 
-Before running the full execution protocol on any task, check whether the prompt is a follow-up to prior work in this session.
+A prompt is a **follow-up** when it is short (≤15 words), contains a deictic reference ("it", "that", "this", "instead", "also", "just", "actually", "rather", "the same"), and does not name a new file, feature area, or different domain by name.
 
-A prompt is a **follow-up** if ALL of the following are true:
-- It contains 3 or fewer tokens that match any domain vocabulary in `graph.json`.
-- It contains at least one deictic or correction reference: "it", "that", "this", "the same", "instead", "actually", "also", "just", "rather", "not that", "make it", "change it to", "do the same".
-- It does NOT introduce a new domain (no vocabulary match score above 0.1 for a domain different from the session's current active domain).
-- `.vectora/session.log` contains at least one prior task entry in this session.
-
-If a prompt qualifies as a follow-up:
-1. Read `.vectora/session.log` to identify the most recent task entry and its domain, pivots, and sub-task index.
-2. Output the follow-up banner (see banner formats below).
-3. Reuse already-loaded pivots. Do not reload. Do not re-inject skeletons already in context.
-4. Execute the follow-up using inherited context.
-5. Append to `.vectora/session.log`: `<timestamp> follow-up: inherited from [turn N] domain=<name>`
-
-If the follow-up introduces a new domain (vocabulary match > 0.1 for a different domain than active), exit follow-up mode and run the standard execution protocol as a new task.
+If follow-up:
+- Do **not** call `npx vectora brief`. Reuse files already in context.
+- First line of response: `─ vectora: follow-up (context reused) ─`
+- Execute using inherited context.
+- Final line: `─ vectora: follow-up · session: ~<session_total> tokens saved ─`
 
 ---
 
-# PER-TASK REFRESH CHECK
+# TASK COMPLETION
 
-Before running any task protocol, attempt to read `.vectora/dirty`.
+When you complete a full task that was initialized via `/vectora prompt <task>`, you MUST output a Token Savings Report at the very end of your final message. Calculate the total tokens saved by summing the `skeleton_pool` values from the briefs you used during the task. Format it exactly like this (do NOT use emojis):
 
-- **File absent** (the common case): proceed immediately. No rebuild happened since the last task. Zero tokens spent on this check.
-- **File present**: the background watcher (`npx vectora watch`) has rebuilt the graph since the last task. Silently reload `.vectora/graph.json` into working memory, then delete `.vectora/dirty` by running `rm .vectora/dirty`. Do not output anything to the user about this reload — it is invisible overhead. Then proceed.
-
-This check costs nothing when the graph is current. It only does real work when a file actually changed.
+```markdown
+> **[ vectora: Task Complete ]**
+> 
+> - Tokens Saved: ~<total_saved> tokens (via Skeletonization)
+> - Context Precision: 100% (Math + LLM Edges)
+> 
+> *vectora shielded your context window from unnecessary files.*
+```
 
 ---
 
-# ON EVERY TASK — FULL EXECUTION PROTOCOL
+# SLASH COMMANDS
 
-Run this protocol on every task that is not classified as a follow-up.
+## /vectora init
+Rebuilds the semantic substrate using a multi-step Agent/CLI handshake.
+**Phase A: Math, Domain Naming, & Semantic Edges**
+1. Run `npx vectora init --step math` — wait for completion. The CLI will output raw file clusters.
+2. Evaluate those raw clusters using your semantic understanding. 
+3. Deduce a clear business domain name for each cluster (e.g., `auth`, `checkout`, `dashboard`).
+4. Look for **implicit semantic connections** between files in those clusters (e.g., Pub/Sub, Dependency Injection, implicit ORM relations) that AST parsers miss.
+5. Feed your findings back to the CLI: 
+   - `npx vectora enrich domains "{ \"Cluster 1\": \"auth\" }"`
+   - `npx vectora enrich edges "{ \"src/auth/login.js\": [\"src/events/emitter.js\"] }"`
 
-## PHASE 1: CHAIN DETECTION
-
-Scan the full prompt for chaining signals. A prompt is chained only when it contains **distinct verb phrases targeting distinct objects** — not "and" joining noun phrases within a single action.
-
-**Single task — do NOT split:**
-- "add X and Y to Z" — one action, two objects of the same verb
-- "fix the login error and the session timeout" — two bugs, one domain
-- "update the user's name and email" — one update operation, two fields
-
-**Chained task — DO split:**
-1. Distinct imperative verbs after sentence boundaries, each with its own object in a different part of the system: "Refactor auth. Update payments. Fix dashboard."
-2. Numbered or bulleted lists where each item begins with an imperative verb targeting a different system.
-3. Coordination conjunctions between clearly distinct action-object pairs: "Refactor the auth module AND update the payments validator AND fix the dashboard display."
-4. Explicit temporal sequence markers between distinct actions: "after that", "once done", "following that", "then update", "next fix".
-
-**Before splitting, ask:** Would this require touching files in more than one domain? If no → single task.
-
-If no chaining signals detected → treat as a single task. Skip to PHASE 3.
-If chaining signals detected → proceed to PHASE 2.
-
-## PHASE 2: MULTI-TASK DECOMPOSITION (chained prompts only)
-
-For each sub-task identified:
-
-**a. Token extraction**
-Split the sub-task description on: whitespace, camelCase boundaries (`addRateLimit` → `add`, `rate`, `limit`), snake_case underscores (`rate_limit` → `rate`, `limit`), and punctuation.
-Lowercase all tokens. Discard tokens under 3 characters.
-
-**b. Domain scoring**
-For each domain in `graph.json`:
-  `score = (count of tokens matching domain vocabulary) / (domain vocabulary size)`
-
-**c. Graph expansion**
-From each matched domain's pivot files, traverse import edges outward to depth 2.
-Include additional domains that contain any of the traversed files.
-
-**d. Tie handling**
-If two or more domains score within 0.05 of each other, include all of them.
-
-**e. Fallback**
-If no domain scores above 0.1, include all domains. Mark as fallback. Use the fallback banner row for this sub-task.
-
-**f. Record per sub-task:**
-- Index (1-based)
-- Description (verb phrase + object)
-- Matched domain(s)
-- Pivot files for those domains (from `graph.json` where `isPivot: true`)
-- Estimated skeleton count: total files in matched domains minus pivot count
-
-**Shared pivot deduplication:**
-Collect all pivot files across all sub-tasks.
-Files appearing in 2 or more sub-tasks → mark as shared pivots.
-Shared pivots load exactly once before any sub-task begins. Never reloaded.
-
-**Write a coordination plan to `.vectora/session.log` before any execution begins:**
-```
-<timestamp> chain: <N> sub-tasks detected
-<timestamp> chain[1]: domain=<name> pivots=[<files>] skeletons≈<N>
-<timestamp> chain[2]: domain=<name> pivots=[<files>] skeletons≈<N>
-(repeat for each sub-task)
-<timestamp> chain: shared=[<files>] — loaded once before execution
-<timestamp> chain: execution locked — beginning sub-task 1
+**Phase B: Dynamic Pivot Analysis & Knowledge Bootstrap**
+1. Request the central files: `npx vectora init --get-pivots`.
+2. Read the top pivot file(s) for each major domain using your file reader (up to your token budget).
+3. Deduce the architectural conventions, framework constraints, and unwritten rules.
+4. Run `npx vectora learn "<rule>" --domain <name>` for each deduced rule. *(Exception to the Universal Mandate: Do not prompt the user for confirmation during this initial bootstrap phase).*
+5. Output a structured virality box summarizing the initialization. Use a Markdown blockquote `>` format exactly like this (do NOT use emojis):
+```markdown
+> **[ vectora: Semantic Substrate Built ]**
+> 
+> - Domains Discovered: <number of domains>
+> - Rules Bootstrapped: <number of rules>
+> - Overhead: Minimal (Surgical Precision)
+> 
+> *The AI agent now perfectly understands your codebase structure.*
 ```
 
-Output the **chained task banner** (see below). Output the full banner before loading any files or beginning any sub-task.
+## /vectora status
+1. Run `npx vectora status` — output its result verbatim.
+2. Append below it: `  session: ~<session_total> tokens saved this session`
 
-## PHASE 3: DOMAIN MATCHING (single task)
+## /vectora watch
+Run `npx vectora watch` in the background.
+Output: `↺ vectora: watcher started — graph rebuilds automatically on file changes.`
 
-**a.** Extract tokens from the full prompt (same camelCase/snake_case split as Phase 2a).
-**b.** Score all domains by vocabulary overlap.
-**c.** Expand via graph traversal to depth 2 from matched domain pivots.
-**d.** Apply tie handling (within 0.05 → include both).
-**e.** Apply fallback if no domain scores above 0.1.
-**f.** Identify pivot files for matched domain(s) — files where `isPivot: true` in `graph.json`.
-**g.** Identify skeleton files: all files in matched domain(s) where `isPivot: false`.
+## /vectora diff
+Run `npx vectora diff` — incremental graph update (faster than full init). Output result verbatim.
 
-Write to `.vectora/session.log`:
+## /vectora why \<filepath\>
+Run `npx vectora why <filepath>` — output result verbatim.
+
+## /vectora help  or  /vectora \<unknown keyword\>
+Output:
 ```
-<timestamp> single task: domain=<name> pivots=[<files>] skeletons≈<N>
+╔─ vectora help ─────────────────────────────────────────────────╗
+│                                                                │
+│  /vectora prompt <task>   navigate & execute explicitly       │
+│  /vectora init            rebuild graph (after big refactors) │
+│  /vectora diff            fast incremental graph update       │
+│  /vectora status          graph state + session savings       │
+│  /vectora watch           auto-rebuild on file changes        │
+│  /vectora why <file>      explain why a file is/isn't a pivot │
+│  /vectora learn <rule>    teach vectora an architectural rule │
+│  /vectora unlearn <rule>  remove an architectural rule        │
+│  /vectora migrate         extract rules from CLAUDE.md/README │
+│  /vectora help            show this message                   │
+│                                                                │
+╚────────────────────────────────────────────────────────────────╝
 ```
 
-Output the **single-task banner** (see below).
-
-## PHASE 4: EXECUTION
-
-**Single task:**
-1. Load pivot files in full using your file-reading tool.
-2. Inject skeletons for non-pivot files in the matched domain (see SKELETON FORMAT — synthesized from graph.json data, not by opening the files).
-3. Execute the task completely.
-4. Compute savings from graph.json data (derived from real file character counts):
-   - `pivot_tokens` = sum of `floor(file.charCount / 4)` for each pivot file loaded this task
-   - `tokens_saved` = sum of `floor((file.charCount / 4) - 30)` for each skeletonized file (30 = skeleton token cost)
-   - `session_total` = sum of all `saved=<N>tok` values already in `.vectora/session.log`
-5. Append to `.vectora/session.log`: `<timestamp> single task: complete · savings: loaded=<pivot_tokens>tok pivot_files=<N> saved=<tokens_saved>tok skeleton_files=<S>`
-6. Output the closing savings line as the **final line** of the response:
-   `─ vectora: <tokens_saved> tokens saved this task · session: <session_total + tokens_saved> tokens saved ─`
-
-**Chained task:**
-1. Load all shared pivots in full. Do not load any sub-task-specific pivots yet.
-2. For each sub-task in order (1 → N):
-   a. Load this sub-task's domain-specific pivots in full. Skip any already loaded as shared pivots.
-   b. Inject skeletons for non-pivots in this sub-task's domain (synthesized from graph.json — do not open files).
-   c. Complete this sub-task fully before starting the next.
-   d. Append to `.vectora/session.log`: `<timestamp> chain[<N>]: complete`
-   e. Do not reload files already in context when moving between sub-tasks.
-3. After all sub-tasks complete:
-   - Compute savings across all sub-tasks combined (sum pivot_tokens, sum tokens_saved).
-   - `session_total` = sum of all `saved=<N>tok` values already in `.vectora/session.log`
-   - Append to `.vectora/session.log`: `<timestamp> chain: all <N> sub-tasks complete · savings: loaded=<total_pivot_tokens>tok saved=<total_tokens_saved>tok`
-   - Output closing savings line: `─ vectora: <total_tokens_saved> tokens saved this task · session: <session_total + total_tokens_saved> tokens saved ─`
-
-**Full-load requests (any task type):**
-If you determine you need the full source of a skeletonized file:
-- Open it using your file-reading tool.
-- Append to `.vectora/session.log`:
-  `<timestamp> full-load: <filepath> — <one-sentence reason> [sub-task <N> or single]`
-- Adjust the savings count: the full-loaded file no longer counts as skeletonized.
-
-**Context reorientation:**
-If at any point during chained execution you lose track of which sub-task is active or which files are in scope: re-read `.vectora/session.log`. The log is the source of truth.
+## /vectora unlearn \<rule\>
+1. STOP and prompt the user for confirmation: *"Are you sure you want to unlearn this rule?"*
+2. If approved, run `npx vectora unlearn "<rule>"`.
 
 ---
 
-# BANNER FORMATS
+# UNIVERSAL USER-IN-THE-LOOP MANDATE
 
-The activation banner is the **first output** of every response to a task — before any code, before any explanation. It is not optional.
+You must **NEVER** silently write to `.vectora/decisions.json`. 
+Whether a rule is generated via background reflection, `/vectora learn`, or `/vectora migrate`, you must **ALWAYS** pause, present the proposed rule(s) to the user, and ask for explicit confirmation: *"Should I write this rule to vectora's institutional memory?"*
+You may only execute `npx vectora learn` AFTER the user explicitly approves.
 
-## Single-task banner (standard):
+---
+
+# INSTITUTIONAL MEMORY (LEARNING)
+
+## 1. Explicit `/vectora learn <rule>`
+When the user types this:
+1. Evaluate if the rule applies globally or to a specific domain.
+2. **PROMPT THE USER:** *"You asked to learn: `<rule>` for domain `[X]`. Should I write this?"*
+3. If the user approves, run: `npx vectora learn "<rule>" --domain <domain>` (omit `--domain` if global).
+
+## 2. Background Knowledge Capture
+At the end of every coding task, silently self-reflect: *Did I discover a project-specific constraint that future agents need to know?*
+**Anti-Bloat Criteria:**
+- ❌ Was it a standard bug fix, typo, localized logic error, or standard framework feature? **Ignore.**
+- ❌ Is the rule already in the `INSTITUTIONAL MEMORY` block of the brief? **Ignore.**
+- ✅ Did the user explicitly correct an architectural choice or pattern? **Capture.**
+- ✅ Did a test fail because of an undocumented project-specific invariant? **Capture.**
+**Execution:**
+If criteria are met, DO NOT run the command automatically. Append a message before ending your turn:
+*"I noticed a new architectural constraint during this task: `<rule>`. Should I add this to vectora's institutional memory so I remember it next time?"*
+
+## 3. Legacy Migration (`/vectora migrate` or User Request)
+1. Proactively read `CLAUDE.md`, `.windsurfrules`, or `README.md` if they exist.
+2. Parse out the behavioral and architectural rules.
+3. **PROMPT THE USER:** Present a compiled list: *"I found the following rules in your CLAUDE.md. Should I migrate them into vectora?"*
+4. Upon approval, run `npx vectora learn` for each approved rule.
+
+---
+
+# BOOTSTRAP MODE (graph absent)
+
+When `npx vectora brief` exits with an error or returns a degraded banner:
+
+**No source files yet (new project):**
 ```
 ╔─ vectora ─────────────────────────────────────────────╗
-│ domain:    <matched domain(s)>                        │
-│ loaded:    <N> pivots (~<pivot_tokens> tokens)        │
-│ skipped:   <N> files → skeletonized (~<tokens_saved> tokens saved) │
+│ mode:      planning (no source files yet)             │
+│ tip:       run `npx vectora init` after first files   │
 ╚───────────────────────────────────────────────────────╝
 ```
+Generate the initial files, then remind the user: "Run `npx vectora init` to activate structural navigation."
 
-`pivot_tokens` and `tokens_saved` are derived from `charCount` in `graph.json` using `floor(charCount / 4)` — the standard offline approximation. `charCount` is the exact byte count of each file.
-
-## Single-task banner (fallback — no domain matched):
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ domain:    fallback (all pivots loaded)               │
-│ loaded:    <N> pivots (~<pivot_tokens> tokens)        │
-│ skipped:   <N> files → skeletonized (~<tokens_saved> tokens saved) │
-╚───────────────────────────────────────────────────────╝
-```
-
-## Chained task banner (one row per sub-task):
-```
-╔─ vectora ───────────────────────────────────────────────╗
-│ chained tasks: <N>                                      │
-│ shared pivots: <filenames, ✦ if manualPivot> → once     │
-│                                                         │
-│ [1/<N>] domain: <name>                                  │
-│         loaded:   <N> pivots (~<pivot_tokens> tokens)   │
-│         skipped:  <N> files → skeletonized (~<tokens_saved> tokens saved) │
-│                                                         │
-│ [2/<N>] domain: <name>                                  │
-│         loaded:   <N> pivots (~<pivot_tokens> tokens)   │
-│         skipped:  <N> files → skeletonized (~<tokens_saved> tokens saved) │
-│                                                         │
-│ (repeat per sub-task)                                   │
-╚─────────────────────────────────────────────────────────╝
-```
-
-## Post-update banner (first task after /vectora update only):
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ ↺ graph refreshed — <N> files, <P> pivots, <D> domains│
-│ domain:    <matched domain(s)>                        │
-│ loaded:    <N> pivots (~<pivot_tokens> tokens)        │
-│ skipped:   <N> files → skeletonized (~<tokens_saved> tokens saved) │
-╚───────────────────────────────────────────────────────╝
-```
-
-## Follow-up banner:
-```
-╔─ vectora ─────────────────────────────────────────────╗
-│ ↩ follow-up to: <domain> [turn <N>]                  │
-│ context:   inherited — no reload needed               │
-│ loaded:    <previously loaded pivot filenames>        │
-╚───────────────────────────────────────────────────────╝
-```
-
-**Manual pivot footnote:**
-When any pivot shown in the banner has `manualPivot: true` in `graph.json`, append immediately below the closing banner line:
-```
-  ✦ manually declared via @vectora pivot
-```
+**Source files exist but graph is absent:**
+The brief output will contain a degraded banner — emit it verbatim. Proceed by best judgment (folder structure inference). After task completion, remind: "Run `npx vectora init` to unlock full navigation."
 
 ---
 
-# SKELETON FORMAT
+# BEFORE SPAWNING SUB-AGENTS
 
-Every non-pivot file in the matched domain is represented in this format. Three lines. No file opened.
-
-```
-// <filepath> [<N> lines — skeleton only]
-// Exports: <comma-separated export names>
-// Imports: <comma-separated import sources>
-```
-
-Skeletons are synthesized from the `exports` and `imports` arrays in `graph.json` — no file open needed. Use `lineCount` from `graph.json` for the header.
-
-If the skeleton is insufficient and you need the real body: open the file and log the reason in `session.log`. Skeletons are a starting point, not a prohibition.
+For any sub-agent whose task involves reading or modifying source files:
+1. Run `npx vectora brief "<sub-task description>"` — capture the full stdout.
+2. Prepend the captured output verbatim before the sub-agent's prompt instructions.
+3. If `npx vectora brief` fails: prepend `Note: vectora graph unavailable — load files by best judgment.`
 
 ---
 
-# REFERENCE: graph.json STRUCTURE
+# END SAVINGS LINE — FORMATS
 
-```json
-{
-  "generated": "<ISO 8601 timestamp>",
-  "gitHash": "<SHA or null>",
-  "avgLinesPerFile": <number>,
-  "files": [
-    {
-      "path": "<relative path>",
-      "domain": "<domain name>",
-      "isPivot": true | false,
-      "manualPivot": true | false,
-      "centralityScore": <number>,
-      "lineCount": <number>,
-      "charCount": <number>,
-      "exports": ["<name>", ...],
-      "imports": ["<source>", ...]
-    }
-  ],
-  "domains": {
-    "<name>": {
-      "pivots": ["<filepath>", ...],
-      "vocabulary": ["<term>", ...]
-    }
-  }
-}
-```
+Always the **last line** of your response, after all code and explanation:
 
-- `isPivot: true` → load full source at task start
-- `isPivot: false` → synthesize a 3-line skeleton from `exports` and `imports` (never open the file)
-- `manualPivot: true` → file was annotated with `// @vectora pivot` → always load in full, always show ✦ in banner
-- `avgLinesPerFile` → used in the token estimate formula
-- `domains[name].vocabulary` → term list used for domain matching against task prompt tokens
+| Task type | Format |
+|---|---|
+| Single task | `─ vectora: ~N tokens saved this task · session: ~M tokens saved ─` |
+| Chained task | `─ vectora: ~N tokens saved this task (K sub-tasks) · session: ~M tokens saved ─` |
+| Follow-up | `─ vectora: follow-up (context reused) · session: ~M tokens saved ─` |
+| All skeletons opened | `─ vectora: 0 tokens saved this task · session: ~M tokens saved ─` |
+
+N = `skeleton_pool` value from brief minus any skeleton tokens spent on files you opened.
+M = running `session_total` from working memory.
