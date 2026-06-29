@@ -5,6 +5,20 @@ license: MIT
 description: Structural codebase navigation. Reads a pre-built AST dependency graph before navigating source files. Handles single tasks, multi-domain tasks, and chained prompts. Detects follow-ups. Active when a task involves reading or modifying source code.
 ---
 
+# WHEN A CONTEXT BRIEF IS PRESENT IN YOUR PROMPT
+
+If your prompt contains a `[VECTORA CONTEXT BRIEF]` block, this takes priority over normal file-loading behavior:
+
+1. Read the brief before doing anything else.
+2. Load all files listed under "LOAD IN FULL" using your file-reading tool. These are the high-centrality pivot files — they are the entry points for the task.
+3. For files listed under "SKELETON ONLY": use the summary line as-is. Do **not** open these files unless the skeleton is insufficient to complete the task — if you do open one, note why.
+4. Do not speculatively open files not mentioned in the brief.
+5. If you spawn further sub-agents for coding tasks: follow the PROPAGATION instruction in the brief — prepend this brief (or a task-scoped subset of it) to their prompts.
+
+This section applies even when the vectora skill is not otherwise installed. The brief is self-contained.
+
+---
+
 # ACTIVATION
 
 Active when a task involves reading or modifying source files — a code change, a bug, a refactor, a new feature, a question about how something works. **Not** active for tasks that don't touch source code: writing commit messages, answering conceptual questions, formatting prose, summarising output.
@@ -194,6 +208,42 @@ Output the onboarding guide:
 │    /vectora help       show this message                               │
 │                                                                        │
 ╚────────────────────────────────────────────────────────────────────────╝
+```
+
+---
+
+# BEFORE SPAWNING SUB-AGENTS
+
+Run this before every Agent tool call whose task involves reading or modifying source files.
+
+**What counts as a coding sub-task:** the prompt mentions file paths, bugs, refactors, features, components, APIs, tests, or specific source symbols.  
+**Skip for:** research, writing, summarization, external API calls, non-code tool use.
+
+**Step 1 — Generate a context brief for each sub-task:**
+
+Run `npx vectora brief "<sub-task description>"` and capture the full stdout output. This is the context brief.
+
+- For **parallel spawns** (multiple Agent calls in one message): run a separate `npx vectora brief "<task-N>"` for each sub-task before constructing any of the Agent tool calls. Each sub-task may match a different domain and needs its own brief.
+- Brief generation is **read-only** — never run `npx vectora init` here.
+
+**Step 2 — Inject the brief into the Agent prompt:**
+
+Prepend the captured brief verbatim before the original sub-agent instructions:
+
+```
+[VECTORA CONTEXT BRIEF]
+...output from npx vectora brief...
+[END VECTORA CONTEXT BRIEF]
+
+<original sub-agent prompt>
+```
+
+**Step 3 — Graph absent fallback:**
+
+If `npx vectora brief` exits with a non-zero code (graph.json missing), inject this line at the top of the sub-agent prompt instead:
+
+```
+Note: vectora graph not available — load source files by best judgment.
 ```
 
 ---

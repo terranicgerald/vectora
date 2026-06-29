@@ -45,6 +45,10 @@ function main() {
     runWatch();
   } else if (subcmd === 'init' || subcmd === '--reset' || !subcmd) {
     if (!runInit()) process.exit(1);
+  } else if (subcmd === 'brief') {
+    const task = args.slice(1).join(' ');
+    if (!task) { console.error('vectora brief: provide a task description'); process.exit(1); }
+    runBrief(task);
   } else if (subcmd === '--help' || subcmd === '-h') {
     printHelp();
   } else {
@@ -59,11 +63,12 @@ function printHelp() {
 vectora — structural codebase navigation for AI coding agents
 
 Commands:
-  vectora init       Scan this project and build .vectora/graph.json
-  vectora watch      Watch for file changes and rebuild the graph automatically
-  vectora install    Install the skill into detected AI agent(s)
-  vectora --reset    Force a full rescan (alias for init)
-  vectora --help     Show this message
+  vectora init             Scan this project and build .vectora/graph.json
+  vectora brief "<task>"   Generate a context brief for sub-agent injection
+  vectora watch            Watch for file changes and rebuild the graph automatically
+  vectora install          Install the skill into detected AI agent(s)
+  vectora --reset          Force a full rescan (alias for init)
+  vectora --help           Show this message
 
 Inside Claude Code, type /vectora to rebuild the graph without leaving the chat.
 Keywords: /vectora init · /vectora status · /vectora watch · /vectora why <file>
@@ -815,6 +820,119 @@ function buildVocabulary(files) {
 }
 
 /**
+ * Splits a free-text string into lowercase tokens for domain vocabulary matching.
+ * Handles camelCase, PascalCase, snake_case, kebab-case, and whitespace/punctuation.
+ * Tokens under 3 characters are discarded (matches skill-side tokenization rules).
+ */
+function tokenize(str) {
+  const decamel = str.replace(/([a-z])([A-Z])/g, '$1 $2');
+  const deseparated = decamel.replace(/[_\-]/g, ' ');
+  return deseparated
+    .toLowerCase()
+    .split(/[\s/\\.,:;'"!?()[\]{}]+/)
+    .filter(t => t.length >= 3);
+}
+
+/**
+ * Reads .vectora/graph.json, matches the task description against domain vocabulary,
+ * and prints a context brief to stdout. The brief is designed to be injected verbatim
+ * into the prompt of any sub-agent handling the task — it tells the agent which files
+ * to load in full (pivots) and which to treat as 3-line skeletons.
+ */
+function runBrief(task) {
+  const root = process.cwd();
+  const graphPath = path.join(root, '.vectora', 'graph.json');
+
+  if (!fs.existsSync(graphPath)) {
+    console.error('vectora brief: no graph found — run `npx vectora init` first');
+    process.exit(1);
+  }
+
+  let graph;
+  try {
+    graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+  } catch {
+    console.error('vectora brief: failed to parse graph.json');
+    process.exit(1);
+  }
+
+  const { domains = {}, files = [] } = graph;
+  const taskTokens = new Set(tokenize(task));
+
+  // Score each domain by vocabulary overlap: matches / vocab size
+  const scores = {};
+  for (const [name, data] of Object.entries(domains)) {
+    const vocab = data.vocabulary || [];
+    if (vocab.length === 0) { scores[name] = 0; continue; }
+    let matches = 0;
+    for (const term of vocab) {
+      if (taskTokens.has(term)) matches++;
+    }
+    scores[name] = matches / vocab.length;
+  }
+
+  const entries = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  const best = entries[0]?.[1] ?? 0;
+
+  let matchedDomains;
+  let isFallback = false;
+
+  if (best < 0.1) {
+    matchedDomains = Object.keys(domains);
+    isFallback = true;
+  } else {
+    matchedDomains = entries.filter(([, s]) => s >= best - 0.05).map(([n]) => n);
+  }
+
+  const matchedFiles = files.filter(f => matchedDomains.includes(f.domain));
+  const pivots = matchedFiles.filter(f => f.isPivot);
+  const skeletons = matchedFiles.filter(f => !f.isPivot);
+
+  const PIVOT_CAP = 20;
+  const SKELETON_CAP = 40;
+  const cappedPivots = pivots.slice(0, PIVOT_CAP);
+  const cappedSkeletons = skeletons.slice(0, SKELETON_CAP);
+
+  const domainLabel = isFallback
+    ? 'fallback (all pivots — no specific domain matched)'
+    : matchedDomains.join(', ');
+
+  const lines = [];
+  lines.push('[VECTORA CONTEXT BRIEF]');
+  lines.push(`task: ${task}`);
+  lines.push(`domain: ${domainLabel}`);
+  lines.push('');
+  lines.push('LOAD IN FULL — pivot files:');
+  if (cappedPivots.length === 0) {
+    lines.push('  (none — load files by best judgment)');
+  } else {
+    for (const f of cappedPivots) lines.push(`  ${f.path}`);
+    if (pivots.length > PIVOT_CAP) {
+      lines.push(`  [truncated — ${pivots.length - PIVOT_CAP} more pivot(s) not shown]`);
+    }
+  }
+  lines.push('');
+  lines.push('SKELETON ONLY — do not open these files, use the summary lines:');
+  if (cappedSkeletons.length === 0) {
+    lines.push('  (none)');
+  } else {
+    for (const f of cappedSkeletons) {
+      const exps = f.exports?.length ? f.exports.join(', ') : 'none';
+      const imps = (f.imports || []).filter(i => !i.startsWith('.')).slice(0, 5).join(', ') || 'none';
+      lines.push(`  // ${f.path} [${f.lineCount} lines] — Exports: ${exps} — Imports: ${imps}`);
+    }
+    if (skeletons.length > SKELETON_CAP) {
+      lines.push(`  [truncated — ${skeletons.length - SKELETON_CAP} more file(s) not shown]`);
+    }
+  }
+  lines.push('');
+  lines.push('PROPAGATION: If you spawn sub-agents for coding tasks, prepend this brief to their prompts.');
+  lines.push('[END VECTORA CONTEXT BRIEF]');
+
+  console.log(lines.join('\n'));
+}
+
+/**
  * Returns the current git HEAD hash. Returns null when git is unavailable or the
  * directory is not a repository — the skill falls back to timestamp-based staleness checks.
  */
@@ -835,6 +953,8 @@ function getGitHash(root) {
 module.exports = {
   main,
   runInit,
+  runBrief,
+  tokenize,
   parseFile,
   computeCentrality,
   inferDomain,
