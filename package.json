@@ -1,7 +1,7 @@
 {
   "name": "vectora",
-  "version": "1.3.3",
-  "description": "Structural codebase navigation for AI coding agents — AST dependency graph + multi-agent skill installer",
+  "version": "2.4.0",
+  "description": "The codebase map your AI coding agent can't see — import graph + git co-change history — so it edits the right files, including the ones grep would miss.",
   "keywords": [
     "vectora",
     "claude",
@@ -13,8 +13,9 @@
     "agent",
     "ast",
     "dependency-graph",
-    "codebase-navigation",
-    "token-efficiency"
+    "co-change",
+    "git-history",
+    "codebase-navigation"
   ],
   "homepage": "https://github.com/terranicgerald/vectora#readme",
   "bugs": {

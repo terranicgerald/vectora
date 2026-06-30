@@ -25,78 +25,27 @@ const TEST_FILE_RE = /\.(test|spec|stories)\.(js|jsx|ts|tsx|py|go|rs|rb)$/;
 const MANUAL_PIVOT_RE = /^[ \t]*\/\/[ \t]*@vectora[ \t]+pivot[ \t]*$/m;
 const MANUAL_PIVOT_HASH_RE = /^[ \t]*#[ \t]*@vectora[ \t]+pivot[ \t]*$/m; // Python/Ruby
 
+// Matches @vectora danger: <text> annotations (// or # comment styles).
+// Co-located with the code they guard; surfaced at map time and in check.
+const DANGER_ANNOTATION_RE = /^[ \t]*(?:\/\/|#)[ \t]*@vectora[ \t]+danger:[ \t]*(.+)$/gm;
+
 const VALID_CONFIG_FIELDS = new Set([
   'pivotThreshold', 'refreshAfterHours', 'refreshAfterChanges',
-  'forcePivots', 'exclude', 'domains', 'tokenBudget', 'languages',
-  'barrelsAsSkeletons', 'configDownweight',
+  'forcePivots', 'exclude', 'domains', 'languages',
+  'configDownweight', 'coChangeMaxFiles', 'tsConfigPath',
 ]);
 
 const SOURCE_EXTENSIONS = /\.(js|jsx|ts|tsx|py|go|rs|rb)$/;
 
 const SKILL_SRC = path.join(__dirname, '..', 'skill', 'SKILL.src.md');
 
-// ─── Package → Domain Signal Table ───────────────────────────────────────────
-// External package imports are the strongest domain signal — a file importing
-// 'stripe' is definitively in the payments domain, regardless of folder structure.
-
-const PACKAGE_DOMAIN_SIGNALS = {
-  // Auth / Security
-  bcrypt: 'auth', bcryptjs: 'auth', argon2: 'auth', 'node-argon2': 'auth',
-  jsonwebtoken: 'auth', passport: 'auth', 'passport-jwt': 'auth',
-  'passport-local': 'auth', 'passport-google-oauth20': 'auth',
-  jose: 'auth', 'express-jwt': 'auth', speakeasy: 'auth',
-  otplib: 'auth', 'node-2fa': 'auth',
-
-  // Payments
-  stripe: 'payments', paypal: 'payments', 'paypal-rest-sdk': 'payments',
-  braintree: 'payments', square: 'payments', '@adyen/api-library': 'payments',
-  razorpay: 'payments', cashfree: 'payments',
-
-  // Database / ORM
-  pg: 'database', mysql2: 'database', sqlite3: 'database', 'better-sqlite3': 'database',
-  sequelize: 'database', '@prisma/client': 'database', prisma: 'database',
-  mongoose: 'database', typeorm: 'database', knex: 'database',
-  'drizzle-orm': 'database', mikro_orm: 'database', objection: 'database',
-
-  // Cache / Session
-  redis: 'cache', ioredis: 'cache', memcached: 'cache',
-  'express-session': 'session', 'connect-redis': 'session', 'cookie-session': 'session',
-
-  // Email / Notifications
-  nodemailer: 'email', '@sendgrid/mail': 'email', 'mailgun-js': 'email',
-  '@mailchimp/mailchimp_marketing': 'email', postmark: 'email',
-  twilio: 'notifications', '@slack/web-api': 'notifications',
-  'firebase-admin': 'notifications',
-
-  // Storage / Uploads
-  multer: 'uploads', sharp: 'images', jimp: 'images', '@aws-sdk/client-s3': 'storage',
-  cloudinary: 'storage', minio: 'storage', '@google-cloud/storage': 'storage',
-
-  // Queue / Background Jobs
-  bull: 'jobs', bullmq: 'jobs', agenda: 'jobs', 'node-cron': 'jobs', bee_queue: 'jobs',
-
-  // Search
-  '@elastic/elasticsearch': 'search', algoliasearch: 'search', meilisearch: 'search',
-
-  // Logging / Monitoring
-  winston: 'logging', pino: 'logging', morgan: 'logging', bunyan: 'logging',
-  '@sentry/node': 'monitoring', newrelic: 'monitoring',
-
-  // HTTP / API clients
-  axios: 'api', 'node-fetch': 'api', got: 'api', superagent: 'api',
-
-  // Python equivalents (package names as imported)
-  PyJWT: 'auth', cryptography: 'auth', 'python-jose': 'auth',
-  'stripe-python': 'payments', paypalrestsdk: 'payments',
-  psycopg2: 'database', pymysql: 'database', sqlalchemy: 'database',
-  motor: 'database', pymongo: 'database', 'django-orm': 'database',
-  celery: 'jobs', rq: 'jobs', boto3: 'storage', 'azure-storage-blob': 'storage',
-
-  // Go/Rust crate signals (first path segment)
-  'golang.org/x/crypto': 'auth', 'github.com/golang-jwt': 'auth',
-  'github.com/stripe/stripe-go': 'payments',
-  'github.com/go-redis/redis': 'cache', 'github.com/jackc/pgx': 'database',
-};
+// Disambiguating short name: last two path segments. `index.ts` alone is
+// useless in repos with many `index.ts` files; `core/index.ts` is clear.
+function shortPath(p) {
+  if (!p) return '';
+  const parts = p.split('/');
+  return parts.length <= 2 ? p : parts.slice(-2).join('/');
+}
 
 // ─── Programming Stopwords ────────────────────────────────────────────────────
 // Terms too generic to be domain signals. Excluded from vocabulary building.
@@ -134,23 +83,7 @@ function main() {
   } else if (subcmd === 'watch') {
     runWatch();
   } else if (subcmd === 'init' || subcmd === '--reset') {
-    let step = null;
-    let getPivots = false;
-    for (let i = 1; i < args.length; i++) {
-      if (args[i] === '--step') step = args[i+1];
-      if (args[i] === '--get-pivots') getPivots = true;
-    }
-    if (step === 'math') {
-      runInitMath();
-    } else if (getPivots) {
-      runInitGetPivots();
-    } else {
-      if (!runInit()) process.exit(1);
-    }
-  } else if (subcmd === 'enrich') {
-    const type = args[1];
-    const mapping = args.slice(2).join(' ');
-    runEnrich(type, mapping);
+    if (!runInit()) process.exit(1);
   } else if (subcmd === 'diff') {
     if (!runDiff()) process.exit(1);
   } else if (subcmd === 'status') {
@@ -170,6 +103,8 @@ function main() {
     }
     if (!ruleText) { console.error('vectora learn: provide a rule text'); process.exit(1); }
     runLearn(ruleText, domain);
+  } else if (subcmd === 'migrate') {
+    runMigrate();
   } else if (subcmd === 'unlearn') {
     let domain = null;
     let ruleText = '';
@@ -183,14 +118,40 @@ function main() {
     }
     if (!ruleText) { console.error('vectora unlearn: provide a rule text to remove'); process.exit(1); }
     runUnlearn(ruleText, domain);
-  } else if (subcmd === 'brief') {
+  } else if (subcmd === 'manifest') {
+    runManifest();
+  } else if (subcmd === 'history') {
+    const filepath = args.slice(1).join(' ');
+    if (!filepath) { console.error('vectora history: provide a file path'); process.exit(1); }
+    runHistory(filepath);
+  } else if (subcmd === 'preflight') {
+    runPreflight();
+  } else if (subcmd === 'impact-report') {
+    runImpactReport();
+  } else if (subcmd === 'map' || subcmd === 'brief') {
     const task = args.slice(1).join(' ');
-    if (!task) { console.error('vectora brief: provide a task description'); process.exit(1); }
-    runBrief(task);
+    if (!task) { console.error('vectora map: provide a task description'); process.exit(1); }
+    runMap(task);
+  } else if (subcmd === 'check') {
+    runCheck();
+  } else if (subcmd === 'overview') {
+    const flag = args[1];
+    if (flag === '--debt') runOverviewDebt();
+    else runOverview();
   } else if (subcmd === 'why') {
     const filepath = args.slice(1).join(' ');
     if (!filepath) { console.error('vectora why: provide a file path'); process.exit(1); }
     runWhy(filepath);
+  } else if (subcmd === 'impact') {
+    const target = args.slice(1).join(' ');
+    if (!target) { console.error('vectora impact: provide a file path or exported symbol'); process.exit(1); }
+    runImpact(target);
+  } else if (subcmd === 'receipts') {
+    runReceipts();
+  } else if (subcmd === 'trace') {
+    const symbol = args.slice(1).join(' ');
+    if (!symbol) { console.error('vectora trace: provide a symbol name'); process.exit(1); }
+    runTrace(symbol);
   } else if (subcmd === '--help' || subcmd === '-h') {
     printHelp();
   } else {
@@ -201,24 +162,38 @@ function main() {
 
 function printHelp() {
   console.log(`
-vectora — structural codebase navigation for AI coding agents
+vectora — the codebase map your AI coding agent can't see
 
 Commands:
-  vectora install            Install the skill into detected AI agent(s) (default)
-  vectora init               Build the mathematical graph (or run specific steps)
-  vectora diff               Fast incremental graph update (git-based)
-  vectora status             Show graph state and staleness
-  vectora doctor             Run system health check and configuration validation
-  vectora learn "<rule>"     Add an architectural rule to decisions.json
-  vectora unlearn "<rule>"   Remove an architectural rule from decisions.json
-  vectora brief "<task>"     Generate context brief for a task
-  vectora why <filepath>     Explain why a file is or isn't a pivot
-  vectora watch              Watch for file changes, rebuild automatically
-  vectora install            Explicitly install the skill into detected AI agent(s)
-  vectora --reset            Force a full rescan (alias for init)
-  vectora --help             Show this message
+  vectora install              Install the skill into detected AI agent(s) (default)
+  vectora init                 Build the dependency + co-change graph (offline, 0 tokens)
+  vectora map "<task>"         Emit the structural map for a task (seeds + neighborhood + co-change)
+  vectora check                Honest receipt: confirmed breaks, co-change misses, callers, stale tests
+  vectora manifest             Causal manifest: why each file changed, what was missed, lifetime count
+  vectora preflight            Pre-session check: open misses, graph staleness, danger zones
+  vectora history <file>       Regression memory: how often this file was flagged and with whom
+  vectora impact-report        30-day impact summary: what vectora caught, highest-risk files
+  vectora diff                 Fast incremental graph update (git-based)
+  vectora status               Show graph state and staleness
+  vectora doctor               Run system health check and configuration validation
+  vectora learn "<rule>"       Add an architectural rule to decisions.json
+  vectora unlearn "<rule>"     Remove an architectural rule from decisions.json
+  vectora migrate              Extract rules from CLAUDE.md, README, .cursorrules, etc.
+  vectora why <filepath>       Explain a file's centrality and graph neighbors
+  vectora impact <file|sym>    What breaks if I change this? (dependents / consumers)
+  vectora overview             Architecture summary: central files, domains, cycles, orphans
+  vectora overview --debt      Coupling debt scores: highest-risk file pairs, test coverage gaps
+  vectora trace <symbol>       Where a symbol is defined, who calls it, what it calls
+  vectora receipts             Lifetime count of incomplete edits vectora has flagged
+  vectora watch                Watch for file changes, rebuild automatically
+  vectora --reset              Force a full rescan (alias for init)
+  vectora --help               Show this message
 
-Use /vectora prompt <task> inside your AI agent to navigate and execute.
+Annotations (in source code, always surfaced at map time):
+  // @vectora danger: <text>   Guard a file/function with a constraint the agent must see
+  // @vectora pivot             Force a file into the pivot set regardless of centrality
+
+Use /vectora <task> inside your AI agent to navigate, then /vectora check when done.
 `.trim());
 }
 
@@ -299,7 +274,7 @@ function runInstall({ silent = false, root = process.cwd() } = {}) {
   if (!silent) {
     console.log('');
     console.log(`✓ vectora: skill installed for ${installed} agent(s)`);
-    console.log(`✓ vectora: open your agent and type '/vectora init' to build the semantic substrate`);
+    console.log(`✓ vectora: open your agent and type '/vectora init' to build the graph (offline, 0 tokens)`);
   }
   return true;
 }
@@ -407,24 +382,21 @@ function buildGeminiVariant(body) {
 }
 
 function buildClaudeCommand() {
-  return `You are handling a \`/vectora $ARGUMENTS\` command. This command is part of the vectora skill — follow the full skill protocol.
+  return `You are handling a \`/vectora $ARGUMENTS\` command, part of the vectora skill. vectora gives you the structural map of the codebase — the import graph and git co-change history — that you cannot compute yourself. It does NOT decide which files to load; you do.
 
-**Entry sequence (required before any keyword logic):**
-1. Check \`.vectora/dirty\` — if present, run \`npx vectora diff\` to reload the graph, then delete the file.
-2. Confirm the graph is current.
+**Entry sequence (required first):**
+1. Check \`.vectora/dirty\` — if present, run \`npx vectora diff\`, then delete the file.
 
 **Then act on the keyword in $ARGUMENTS:**
 
-**No argument or "init"**
-- Output: \`↺ vectora: rebuilding graph...\`
-- Run \`npx vectora init\` and wait for completion — output its lines verbatim
-- Note: next task brief will show a "↺ graph refreshed" row
+**"init"**
+Run \`npx vectora init\` and output its lines verbatim. This is offline and costs no tokens.
 
 **"diff"**
 Run \`npx vectora diff\` — fast incremental update. Output result verbatim.
 
 **"status"**
-Run \`npx vectora status\` — output result verbatim. Append session total from working memory.
+Run \`npx vectora status\` — output result verbatim.
 
 **"watch"**
 Run \`npx vectora watch\` in the background. Confirm it started.
@@ -432,12 +404,48 @@ Run \`npx vectora watch\` in the background. Confirm it started.
 **"why <filepath>"**
 Run \`npx vectora why <filepath>\` — output result verbatim.
 
-**"prompt <task>"**
-The recommended pairing pattern. Extract everything after "prompt" as the task.
-Run \`npx vectora brief "<task>"\`. Emit banner verbatim. Load files. Execute. Show savings.
+**"impact <file|symbol>"**
+Run \`npx vectora impact <target>\` — what breaks if this changes (dependents / symbol consumers). Output verbatim.
 
-**Unknown keyword**
-List available: \`init\`, \`diff\`, \`status\`, \`watch\`, \`why <filepath>\`, \`prompt <task>\`, \`help\`.
+**"overview"**
+Run \`npx vectora overview\` — architecture summary (central files, domains, cycles, orphans). Ideal first action on an unfamiliar or new repo. Output verbatim.
+
+**"trace <symbol>"**
+Run \`npx vectora trace <symbol>\` — where it's defined, who calls it, what it depends on. Output verbatim.
+
+**"receipts"**
+Run \`npx vectora receipts\` — show the lifetime count of incomplete edits vectora has flagged in this repo: confirmed breaks, forgotten co-change files, callers to verify, stale tests. An honest number — every entry is a real inspectable event, never an invented percentage.
+
+**"preflight"**
+Run \`npx vectora preflight\` — situational awareness before a session: graph staleness, open misses from the last session, danger zone inventory, cycle presence. Output verbatim before beginning any large task.
+
+**"manifest"**
+Run \`npx vectora manifest\` — causal receipt of the current session: which files were directly targeted, which changed because of structural coupling (arity breaks / co-change), which were flagged but not edited. Paste the output into your PR description.
+
+**"history <filepath>"**
+Run \`npx vectora history <filepath>\` — cross-session coupling memory for a file: how often it changed, which files were co-edited, which co-change partners were flagged but skipped. If a file appears flagged 3+ times without being edited, propose \`/vectora learn\` to bake it in.
+
+**"impact-report"**
+Run \`npx vectora impact-report\` — 30-day aggregate summary: confirmed breaks caught, co-change links used/missed, highest-risk file, coupling debt trend. Share this in retrospectives.
+
+**"overview --debt"**
+Run \`npx vectora overview --debt\` — coupling debt scores for all file pairs: co-change frequency × weight + shared imports × weight − test coverage. Surfaces the highest-risk pairs that have no test safety net.
+
+**"check"**
+Run \`npx vectora check\` and output the receipt verbatim. It works even if you skipped map. It reports four things:
+1. **✗ BROKEN** — confirmed arity mismatches: you changed a function's signature and a live call site now passes the wrong number of args. **Fix these before finishing — they are proven inconsistencies, not guesses.**
+2. **⚠ co-change misses** — files that historically change with what you edited but weren't touched.
+3. **⚠ caller warnings** — importers that reference an exported symbol from a file you changed (verify they still compile/work).
+4. **⚠ stale tests** — colocated tests for source files you changed.
+Investigate every line. For ✗ BROKEN: fix immediately. For ⚠: open the flagged file and decide if it needs updating before you finish.
+
+**A task description (anything else — the default)**
+Treat the entire \`$ARGUMENTS\` as the task.
+1. Run \`npx vectora map "<task>"\` and emit the \`[VECTORA MAP]\` block verbatim as the first lines of your response.
+2. Navigate from the seeds using your own judgment. Open the files YOU decide are relevant — nothing is hidden or off-limits.
+3. Pay attention to the CO-CHANGE section: those files are edited together in git history and grep cannot reveal them. Check whether they need changing too.
+4. Execute the task completely.
+5. When done, run \`npx vectora check\` and show its receipt as the final lines.
 `;
 }
 
@@ -685,6 +693,94 @@ function runUnlearn(ruleText, domain, { root = process.cwd() } = {}) {
   }
 }
 
+// ─── Migrate ──────────────────────────────────────────────────────────────────
+// Auto-discovers existing rule/convention files in the repo (CLAUDE.md, README,
+// .cursorrules, CONTRIBUTING.md, etc.) and prints a structured block for the
+// agent to extract architectural rules from, with dedup against decisions.json.
+
+function runMigrate({ root = process.cwd() } = {}) {
+  const CANDIDATE_PATHS = [
+    'CLAUDE.md', 'CLAUDE.local.md',
+    'README.md', 'README.rst', 'README.txt',
+    '.cursorrules', '.windsurfrules',
+    'CONTRIBUTING.md', '.github/CONTRIBUTING.md',
+    'docs/ARCHITECTURE.md', 'docs/CONTRIBUTING.md', 'docs/DECISIONS.md',
+  ];
+  const CANDIDATE_GLOBS = ['RULES.md', 'DECISIONS.md', 'CONVENTIONS.md', 'ARCHITECTURE.md'];
+
+  // Collect fixed candidates that exist
+  const found = [];
+  for (const p of CANDIDATE_PATHS) {
+    const full = path.join(root, p);
+    if (fs.existsSync(full)) found.push({ rel: p, full });
+  }
+
+  // Walk up to 3 levels deep for glob candidates (exclude node_modules/.vectora/etc)
+  const SKIP_DIRS = new Set(['node_modules', '.git', '.vectora', 'dist', 'build', 'coverage', '.next', 'vendor']);
+  const walkForGlobs = (dir, depth) => {
+    if (depth > 3) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (!SKIP_DIRS.has(e.name)) walkForGlobs(path.join(dir, e.name), depth + 1);
+      } else if (CANDIDATE_GLOBS.includes(e.name)) {
+        const full = path.join(dir, e.name);
+        const rel = path.relative(root, full);
+        if (!found.some(f => f.full === full)) found.push({ rel, full });
+      }
+    }
+  };
+  walkForGlobs(root, 0);
+
+  if (found.length === 0) {
+    console.log('[VECTORA MIGRATE]');
+    console.log('No rule source files found (looked for CLAUDE.md, README.md, .cursorrules,');
+    console.log('CONTRIBUTING.md, docs/ARCHITECTURE.md, RULES.md, DECISIONS.md, etc.).');
+    console.log('Create one of these files with your project rules, then re-run /vectora migrate.');
+    console.log('[END VECTORA MIGRATE]');
+    return;
+  }
+
+  // Load existing decisions to report what will be skipped
+  const decisionsPath = path.join(root, '.vectora', 'decisions.json');
+  let existing = [];
+  if (fs.existsSync(decisionsPath)) {
+    try {
+      const d = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+      if (d.global) existing = existing.concat(d.global);
+      if (d.domains) for (const rules of Object.values(d.domains)) existing = existing.concat(rules);
+    } catch {}
+  }
+
+  const MAX_CHARS_PER_FILE = 8000;
+  console.log('[VECTORA MIGRATE]');
+  console.log(`Found ${found.length} rule source file${found.length > 1 ? 's' : ''}: ${found.map(f => f.rel).join(', ')}`);
+  console.log('');
+  for (const { rel, full } of found) {
+    let content;
+    try { content = fs.readFileSync(full, 'utf8'); } catch { continue; }
+    if (content.length > MAX_CHARS_PER_FILE) {
+      content = content.slice(0, MAX_CHARS_PER_FILE) + `\n… [truncated — ${Math.ceil(content.length / MAX_CHARS_PER_FILE)}x original length]`;
+    }
+    console.log(`--- ${rel} ---`);
+    console.log(content.trimEnd());
+    console.log('');
+  }
+  if (existing.length > 0) {
+    console.log(`Already in decisions.json (skip these — do not re-import):`);
+    for (const r of existing) console.log(`  - ${r}`);
+    console.log('');
+  }
+  console.log('Extract architectural constraints, invariants, and coupling rules from the files above.');
+  console.log('Skip: style preferences, tooling setup, CI/CD instructions, one-off workarounds,');
+  console.log('      anything already listed in "Already in decisions.json" above.');
+  console.log('For each extracted rule, propose to the user:');
+  console.log('  npx vectora learn "<rule>" [--domain <domain>]');
+  console.log('Confirm with the user before writing each one. Never write rules silently.');
+  console.log('[END VECTORA MIGRATE]');
+}
+
 // ─── Status ───────────────────────────────────────────────────────────────────
 
 function runStatus({ root = process.cwd() } = {}) {
@@ -723,12 +819,25 @@ function runStatus({ root = process.cwd() } = {}) {
   }
 
   const pad = (s, n) => String(s).padEnd(n);
+  // Receipts summary (non-blocking if ledger absent)
+  let receiptsLine = 'no receipts yet';
+  try {
+    const lp = path.join(root, '.vectora', 'ledger.json');
+    if (fs.existsSync(lp)) {
+      const ld = JSON.parse(fs.readFileSync(lp, 'utf8'));
+      const evs = ld.events || [];
+      const grand = evs.reduce((s, e) => s + (e.confirmedBreaks||0) + (e.coChangeMisses||0) + (e.callerWarnings||0) + (e.staleTests||0), 0);
+      receiptsLine = `${grand} flagged across ${evs.length} task${evs.length !== 1 ? 's' : ''}`;
+    }
+  } catch {}
+
   console.log('╔─ vectora status ──────────────────────────────────────╗');
   console.log(`│ files:   ${pad(fileCount + '  ·  language: ' + lang, 44)}│`);
   console.log(`│ pivots:  ${pad(pivotCount + '   (' + pivotPct + '% of codebase)', 44)}│`);
   console.log(`│ domains: ${pad(domains.length > 44 ? domains.slice(0,41)+'...' : domains, 44)}│`);
   console.log(`│ built:   ${pad(built, 44)}│`);
   console.log(`│ git:     ${pad(gitHash + '  ·  stale: ' + stale, 44)}│`);
+  console.log(`│ catches: ${pad(receiptsLine, 44)}│`);
   console.log('╚───────────────────────────────────────────────────────╝');
 }
 
@@ -761,14 +870,15 @@ function runWhy(filepath, { root = process.cwd() } = {}) {
     ? `scored top ${Math.round((graph.pivotThreshold || 0.15) * 100)}% by centrality`
     : 'not a pivot (below centrality threshold)';
 
-  const importedBy = (graph.files || [])
-    .filter(other => (other.imports || []).some(imp => imp.includes(path.basename(f.path, path.extname(f.path)))))
-    .map(other => other.path)
-    .slice(0, 4)
-    .join(', ') || 'none';
+  // Precise reverse edges from the resolved import graph (not name-guessing).
+  const directDeps = f.importedBy || [];
+  const transitive = transitiveDependents(graph, f.path);
+  const blast = `${directDeps.length} direct · ${transitive.size} total`;
+  const importedBy = directDeps.slice(0, 4).join(', ') || 'none';
 
-  const importsLocal = (f.imports || [])
-    .filter(i => i.startsWith('.'))
+  const importsLocal = (f.importsResolved && f.importsResolved.length
+    ? f.importsResolved
+    : (f.imports || []).filter(i => i.startsWith('.')))
     .slice(0, 4)
     .join(', ') || 'none';
 
@@ -776,6 +886,7 @@ function runWhy(filepath, { root = process.cwd() } = {}) {
   const header = `─ vectora why: ${f.path} `;
   console.log(`╔${header}${'─'.repeat(Math.max(0, 54 - header.length))}╗`);
   console.log(`│ centrality:  ${pad(f.centralityScore + '  (in: ' + (f.inDegree||0) + ', out: ' + (f.outDegree||0) + ')', 40)}│`);
+  console.log(`│ blast:       ${pad(blast + (transitive.size >= 5 ? '  ⚠ ripples' : ''), 40)}│`);
   console.log(`│ pivot:       ${pad(f.isPivot ? 'yes' : 'no', 40)}│`);
   console.log(`│ reason:      ${pad(reason.length > 40 ? reason.slice(0,37)+'...' : reason, 40)}│`);
   console.log(`│ domain:      ${pad(f.domain || 'unknown', 40)}│`);
@@ -784,86 +895,207 @@ function runWhy(filepath, { root = process.cwd() } = {}) {
   console.log(`╚${'─'.repeat(54)}╝`);
 }
 
-// ─── Init & Enrichment ────────────────────────────────────────────────────────
-
-function runInitMath({ root = process.cwd() } = {}) {
-  // Build the basic graph and output raw clusters
-  if (!runInit({ silent: true, root })) {
-    console.error('vectora init --step math failed.');
-    process.exit(1);
+// Transitive reverse-dependency closure: every file that imports `startPath`,
+// directly or through a chain. The "blast radius" of changing that file.
+function transitiveDependents(graph, startPath) {
+  const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+  const seen = new Set();
+  const queue = [startPath];
+  while (queue.length) {
+    const cur = queue.shift();
+    const f = byPath.get(cur);
+    if (!f) continue;
+    for (const imp of (f.importedBy || [])) {
+      if (!seen.has(imp)) { seen.add(imp); queue.push(imp); }
+    }
   }
-  const graphPath = path.join(root, '.vectora', 'graph.json');
-  const graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
-  console.log('--- RAW CLUSTERS ---');
-  for (const [domainName, domainObj] of Object.entries(graph.domains || {})) {
-    console.log(`Cluster: ${domainName}`);
-    console.log(`Files: ${domainObj.pivots?.slice(0, 5).join(', ')} ...`);
-  }
+  seen.delete(startPath);
+  return seen;
 }
 
-function runInitGetPivots({ root = process.cwd() } = {}) {
-  const graphPath = path.join(root, '.vectora', 'graph.json');
-  if (!fs.existsSync(graphPath)) return;
-  const graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
-  console.log('--- TOP PIVOTS ---');
-  for (const [domainName, domainObj] of Object.entries(graph.domains || {})) {
-    if (domainObj.pivots && domainObj.pivots.length > 0) {
-      console.log(`Domain [${domainName}]:`);
-      for (const p of domainObj.pivots.slice(0, 3)) {
-        console.log(`  ${p}`);
-      }
+// ─── Impact ─────────────────────────────────────────────────────────────────
+// "What breaks if I change this?" — direct + transitive dependents for a file,
+// or the consumers of an exported symbol. Pure static graph; no git history.
+
+function runImpact(target, { root = process.cwd() } = {}) {
+  const graph = loadGraphForTask(root, 'impact');
+  if (!graph) return;
+  const files = graph.files || [];
+  const lower = target.toLowerCase();
+
+  // File match first (path or path-suffix), like `why`.
+  const file = files.find(f => f.path.toLowerCase() === lower || f.path.toLowerCase().includes(lower));
+
+  console.log('[VECTORA IMPACT]');
+  if (file) {
+    const direct = file.importedBy || [];
+    const transitive = transitiveDependents(graph, file.path);
+    console.log(`  ${file.path}`);
+    console.log(`  blast radius: ${direct.length} direct importer(s), ${transitive.size} total dependent(s).`);
+    if (direct.length) {
+      console.log('  direct importers:');
+      for (const p of direct.slice(0, 12)) console.log(`    • ${p}`);
+      if (direct.length > 12) console.log(`    …and ${direct.length - 12} more.`);
+    }
+    const indirect = [...transitive].filter(p => !direct.includes(p));
+    if (indirect.length) {
+      console.log(`  transitive (through a chain): ${indirect.slice(0, 10).join(', ')}${indirect.length > 10 ? ', …' : ''}`);
+    }
+    if (!direct.length && !transitive.size) {
+      console.log('  nothing imports this file — changing it is structurally isolated (leaf/entry point).');
+    }
+    console.log('[END VECTORA IMPACT]');
+    return;
+  }
+
+  // Otherwise treat the target as an exported symbol.
+  const definers = files.filter(f => (f.exports || []).some(e => String(e).toLowerCase() === lower));
+  if (definers.length === 0) {
+    console.log(`  "${target}" is not a known file or exported symbol — run \`npx vectora init\` to reindex.`);
+    console.log('[END VECTORA IMPACT]');
+    return;
+  }
+  for (const def of definers) {
+    const consumers = (def.importedBy || []).filter(p => {
+      const imp = files.find(f => f.path === p);
+      return imp && (imp.allIdentifiers || []).includes(lower);
+    });
+    console.log(`  symbol "${target}" defined in ${def.path}`);
+    if (consumers.length) {
+      console.log(`  consumed by ${consumers.length} file(s):`);
+      for (const p of consumers.slice(0, 12)) console.log(`    • ${p}`);
+      if (consumers.length > 12) console.log(`    …and ${consumers.length - 12} more.`);
+      console.log('  → change its signature and every one of these is a candidate edit.');
+    } else {
+      console.log('  no importing file references this symbol by name — may be unused or accessed dynamically.');
     }
   }
+  console.log('[END VECTORA IMPACT]');
 }
 
-function runEnrich(type, mappingRaw, { root = process.cwd() } = {}) {
-  const graphPath = path.join(root, '.vectora', 'graph.json');
-  if (!fs.existsSync(graphPath)) return;
-  let graph = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+// ─── Overview ───────────────────────────────────────────────────────────────
+// "Explain this codebase." The highest-value first action on an unfamiliar or
+// brand-new repo: central files, domains, entry points, cycles, orphans. All
+// static — needs no git history.
 
-  let mapping = {};
-  try {
-    mapping = JSON.parse(mappingRaw);
-  } catch (e) {
-    console.error('vectora enrich: invalid JSON mapping');
-    process.exit(1);
+function runOverview({ root = process.cwd() } = {}) {
+  const graph = loadGraphForTask(root, 'overview');
+  if (!graph) return;
+  const files = graph.files || [];
+  const real = files.filter(f => !f.isTest);
+  const label = graph.projectMeta?.label || graph.language || 'codebase';
+
+  console.log('[VECTORA OVERVIEW]');
+  console.log(`  ${real.length} source files · ${label}`);
+
+  const central = [...real].sort((a, b) => (b.inDegree || 0) - (a.inDegree || 0))
+    .filter(f => (f.inDegree || 0) > 0).slice(0, 6);
+  if (central.length) {
+    console.log('');
+    console.log('  most-depended-on (start reading here):');
+    for (const f of central) console.log(`    • ${f.path}  (imported by ${f.inDegree})`);
   }
 
-  if (type === 'domains') {
-    // mapping is { oldClusterName: newSemanticName }
-    const newDomains = {};
-    for (const [oldName, newName] of Object.entries(mapping)) {
-      if (graph.domains[oldName]) {
-        newDomains[newName] = graph.domains[oldName];
-      }
-    }
-    // Update files domainLabel
-    for (const file of graph.files) {
-      if (mapping[file.domain]) file.domain = mapping[file.domain];
-    }
-    // Keep unmapped ones
-    for (const [name, obj] of Object.entries(graph.domains)) {
-      if (!mapping[name]) newDomains[name] = obj;
-    }
-    graph.domains = newDomains;
-    console.log('vectora enrich: domains updated successfully.');
-
-  } else if (type === 'edges') {
-    // mapping is { "file/A.js": ["file/B.js"] }
-    for (const file of graph.files) {
-      if (mapping[file.path]) {
-        file.semanticEdges = mapping[file.path];
-      }
-    }
-    console.log('vectora enrich: semantic edges updated successfully.');
+  const domains = Object.entries(graph.domains || {})
+    .map(([d, v]) => ({ d, n: v.fileCount || 0 }))
+    .filter(x => x.d && x.d !== 'root')
+    .sort((a, b) => b.n - a.n).slice(0, 8);
+  if (domains.length) {
+    console.log('');
+    console.log('  domains:');
+    for (const { d, n } of domains) console.log(`    • ${d}  (${n} files)`);
   }
 
-  fs.writeFileSync(graphPath, JSON.stringify(graph, null, 2), 'utf8');
+  const entries = real.filter(f => (f.inDegree || 0) === 0 && (f.outDegree || 0) > 0);
+  if (entries.length) {
+    console.log('');
+    console.log(`  entry points (imported by nothing, import others): ${entries.slice(0, 6).map(f => f.path).join(', ')}${entries.length > 6 ? ', …' : ''}`);
+  }
+
+  const orphans = real.filter(f => (f.inDegree || 0) === 0 && (f.outDegree || 0) === 0 && !f.isConfig);
+  if (orphans.length) {
+    console.log('');
+    console.log(`  orphans (no import edges either way — dead code?): ${orphans.slice(0, 6).map(f => f.path).join(', ')}${orphans.length > 6 ? ', …' : ''}`);
+  }
+
+  const cycles = detectCycles(graph);
+  if (cycles.length) {
+    console.log('');
+    console.log('  ⚠ circular imports:');
+    for (const cyc of cycles.slice(0, 4)) console.log(`    • ${cyc.map(shortPath).join(' → ')} → …`);
+  }
+
+  console.log('[END VECTORA OVERVIEW]');
 }
+
+// Finds circular import chains via DFS over resolved forward edges. Returns a
+// few representative cycles (the chain of paths involved).
+function detectCycles(graph) {
+  const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map([...byPath.keys()].map(p => [p, WHITE]));
+  const stack = [];
+  const cycles = [];
+
+  const dfs = (p) => {
+    color.set(p, GRAY);
+    stack.push(p);
+    const f = byPath.get(p);
+    for (const next of (f?.importsResolved || [])) {
+      if (!byPath.has(next)) continue;
+      if (color.get(next) === GRAY) {
+        const idx = stack.indexOf(next);
+        if (idx !== -1) cycles.push(stack.slice(idx));
+      } else if (color.get(next) === WHITE) {
+        dfs(next);
+      }
+    }
+    stack.pop();
+    color.set(p, BLACK);
+  };
+
+  for (const p of byPath.keys()) {
+    if (color.get(p) === WHITE && cycles.length < 10) dfs(p);
+  }
+  return cycles;
+}
+
+// ─── Trace ──────────────────────────────────────────────────────────────────
+// Symbol-level navigation: where a symbol is defined, who references it, and
+// what its defining file depends on.
+
+function runTrace(symbol, { root = process.cwd() } = {}) {
+  const graph = loadGraphForTask(root, 'trace');
+  if (!graph) return;
+  const files = graph.files || [];
+  const lower = symbol.toLowerCase();
+
+  const definers = files.filter(f => (f.exports || []).some(e => String(e).toLowerCase() === lower));
+  console.log('[VECTORA TRACE]');
+  if (definers.length === 0) {
+    console.log(`  "${symbol}" is not an exported symbol in the graph — run \`npx vectora init\` to reindex.`);
+    console.log('[END VECTORA TRACE]');
+    return;
+  }
+  for (const def of definers) {
+    console.log(`  defined in: ${def.path}`);
+    const callers = (def.importedBy || []).filter(p => {
+      const imp = files.find(f => f.path === p);
+      return imp && (imp.allIdentifiers || []).includes(lower);
+    });
+    console.log(`  callers (${callers.length}): ${callers.slice(0, 10).join(', ') || 'none found'}`);
+    const callees = (def.importsResolved || []).slice(0, 10);
+    console.log(`  this file depends on: ${callees.join(', ') || 'nothing local'}`);
+  }
+  console.log('[END VECTORA TRACE]');
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
 function runInit({ silent = false, root = process.cwd() } = {}) {
   const config = mergeConfig(loadConfig(root));
   const projectType = detectProjectType(root);
+  const isFirstInit = !fs.existsSync(path.join(root, '.vectora', 'graph.json'));
   const filePaths = walkDir(root, root, config);
 
   if (filePaths.length === 0) {
@@ -882,19 +1114,33 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
     parsed.push({ fullPath, path: relative, ...result });
   }
 
+  // Colocated test files (foo.test.ts next to foo.ts). Indexed for pairing only —
+  // never parsed into the centrality graph, so pivots are unaffected.
+  const testByStem = findColocatedTests(root, config);
+
   if (parsed.length === 0) {
     if (!silent) console.log('vectora: all files failed to parse. Check for syntax errors.');
     return false;
   }
 
   // Build co-change peers from git history (supplementary, non-blocking)
-  const coChangePeers = buildCoChangePeers(parsed, root);
+  const config0 = config;
+  const { peerMap: coChangePeers, pairs: coChangePairs } =
+    buildCoChangePeers(parsed, root, config0.coChangeMaxFiles);
 
-  // Compute centrality from import edges
-  const { inDegree, outDegree } = computeCentrality(parsed);
+  // Load path alias config (tsconfig/jsconfig paths + baseUrl) and workspace
+  // package map so non-relative imports like `@/foo` and `@myorg/shared` resolve.
+  const tsConfig = loadTsConfig(root, config.tsConfigPath);
+  const workspacePackages = loadWorkspacePackages(root);
+  const aliases = { ...tsConfig, workspacePackages };
 
-  // Classify barrel and config files before scoring
-  const allPathsSet = new Set(parsed.map(f => f.fullPath));
+  // Compute centrality and resolved forward/reverse edges from import statements
+  const { inDegree, outDegree, imports: importsMap, importedBy: importedByMap } =
+    computeCentrality(parsed, aliases);
+
+  // fullPath → relative path, for translating resolved edges to graph paths
+  const relOf = new Map(parsed.map(f => [f.fullPath, f.path]));
+  const toRel = (fullPaths) => (fullPaths || []).map(fp => relOf.get(fp)).filter(Boolean);
 
   const scored = parsed.map(f => {
     const barrel = isBarrelFile(f);
@@ -909,6 +1155,8 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
       centralityScore,
       inDegree: inDegree.get(f.fullPath) ?? 0,
       outDegree: outDegree.get(f.fullPath) ?? 0,
+      importsResolved: toRel(importsMap.get(f.fullPath)),
+      importedBy: toRel(importedByMap.get(f.fullPath)),
       coChangePeers: coChangePeers.get(f.path) || [],
     };
   });
@@ -962,8 +1210,7 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
     path: f.path,
     language: getFileLanguage(f.path),
     domain: domainMap.get(f.fullPath),
-    isPivot: (topPaths.has(f.fullPath) || f.manualPivot || forcePivotSet.has(f.fullPath) ||
-              isFrameworkForcedPivot(f, projectType.framework)) && !f.isBarrel,
+    isPivot: (topPaths.has(f.fullPath) || f.manualPivot || forcePivotSet.has(f.fullPath)) && !f.isBarrel,
     manualPivot: f.manualPivot || forcePivotSet.has(f.fullPath),
     isBarrel: f.isBarrel,
     isConfig: f.isConfig,
@@ -973,12 +1220,16 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
     lineCount: f.lineCount,
     charCount: f.charCount,
     exports: f.exports,
+    exportSignatures: f.exportSignatures || {},
     imports: f.imports,
-    packageSignals: getPackageSignals(f.imports || []),
+    importsResolved: f.importsResolved,
+    importedBy: f.importedBy,
     allIdentifiers: f.allIdentifiers || [],
     stringLiterals: f.stringLiterals || [],
     commentTerms: f.commentTerms || [],
     coChangePeers: f.coChangePeers,
+    testPath: testByStem.get(stemKey(f.path)) || null,
+    dangerZones: f.dangerZones || [],
   }));
 
   // Build domain vocabulary using all 5 semantic signals + TF-IDF
@@ -1025,8 +1276,14 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
       lang: projectType.lang,
       label: projectType.label,
     },
+    aliasConfig: {
+      baseUrl: tsConfig.baseUrl,
+      pathCount: Object.keys(tsConfig.paths).length,
+      workspaceCount: workspacePackages.size,
+    },
     files,
     domains,
+    coChange: coChangePairs,
   };
 
   fs.mkdirSync(path.join(root, '.vectora'), { recursive: true });
@@ -1037,19 +1294,41 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
   );
 
   if (!silent) {
-    const domainList = Object.keys(domains).join(', ');
+    const importEdges = files.reduce((s, f) => s + (f.importsResolved || []).length, 0);
     // Box inner width = 63 chars (between │ and │), total box = 65 chars
     const W = 63;
     const pad = (s) => String(s).padEnd(W);
-    const trunc = (s) => s.length > W ? s.slice(0, W - 3) + '...' : s;
+    const aliasLine = (() => {
+      const parts = [];
+      if (Object.keys(tsConfig.paths).length > 0) parts.push(`${Object.keys(tsConfig.paths).length} path alias${Object.keys(tsConfig.paths).length > 1 ? 'es' : ''}`);
+      else if (tsConfig.baseUrl) parts.push('baseUrl resolved');
+      if (workspacePackages.size > 0) parts.push(`${workspacePackages.size} workspace pkg${workspacePackages.size > 1 ? 's' : ''}`);
+      return parts.length ? parts.join('  ·  ') : null;
+    })();
     console.log('╔─ vectora ─────────────────────────────────────────────────────╗');
-    console.log(`│ ${pad('↺ graph built')}│`);
-    console.log(`│ ${pad('files:    ' + files.length + '  ·  ' + projectType.label)}│`);
-    console.log(`│ ${pad('pivots:   ' + totalPivots + '  (' + Math.round((totalPivots/files.length)*100) + '%)')}│`);
-    console.log(`│ ${pad('domains:  ' + trunc(domainList))}│`);
+    console.log(`│ ${pad('↺ graph built  ·  offline  ·  0 tokens')}│`);
+    console.log(`│ ${pad('files:       ' + files.length + '  ·  ' + projectType.label)}│`);
+    console.log(`│ ${pad('import edges: ' + importEdges)}│`);
+    console.log(`│ ${pad('co-change:    ' + coChangePairs.length + ' file pairs (from git history)')}│`);
+    if (aliasLine) console.log(`│ ${pad('aliases:      ' + aliasLine)}│`);
     console.log('╚───────────────────────────────────────────────────────────────╝');
     console.log('');
-    console.log(`  Use /vectora prompt <task> to start navigating with full context.`);
+    console.log(`  Use /vectora <task> to navigate, then /vectora check when done.`);
+    if (isFirstInit) {
+      console.log('');
+      console.log('[VECTORA SEED]');
+      console.log('First graph built on this repo. Before your first coding task:');
+      console.log('  1. Run /vectora overview — read the domain + pivot summary.');
+      console.log('  2. Run /vectora why <top-pivot-file> for each of the top 3 pivot files.');
+      console.log('  3. Synthesize 3–7 architectural rules (invariants, coupling constraints,');
+      console.log('     patterns the graph reveals). Use your judgment as an LLM — this is');
+      console.log('     exactly where LLM reasoning adds value that zero-token init cannot.');
+      console.log('  4. Propose each rule to the user. On approval:');
+      console.log('     npx vectora learn "<rule>" [--domain <domain>]');
+      console.log('  Also consider: /vectora migrate — extracts rules from CLAUDE.md,');
+      console.log('  README.md, or any existing rule/convention files in the repo.');
+      console.log('[END VECTORA SEED]');
+    }
   }
 
   return true;
@@ -1122,7 +1401,8 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
     ...updatedParsed,
   ];
 
-  const { inDegree, outDegree } = computeCentrality(newParsedForCentrality);
+  const diffAliases = { ...loadTsConfig(root, config.tsConfigPath), workspacePackages: loadWorkspacePackages(root) };
+  const { inDegree, outDegree } = computeCentrality(newParsedForCentrality, diffAliases);
   const pivotCount = Math.ceil(newParsedForCentrality.length * config.pivotThreshold);
   const allScored = newParsedForCentrality.map(f => ({
     ...f,
@@ -1142,7 +1422,6 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
       inDegree: inDegree.get(f.fullPath) ?? 0,
       outDegree: outDegree.get(f.fullPath) ?? 0,
       isPivot: topPaths.has(f.fullPath) || source.manualPivot || false,
-      packageSignals: getPackageSignals(source.imports || []),
       allIdentifiers: source.allIdentifiers || [],
       stringLiterals: source.stringLiterals || [],
       commentTerms: source.commentTerms || [],
@@ -1162,12 +1441,15 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
   return true;
 }
 
-// ─── Brief ────────────────────────────────────────────────────────────────────
+// ─── Map ──────────────────────────────────────────────────────────────────────
+// vectora does not decide which files to load. It emits the structural map the
+// agent cannot compute itself — seeds matched to the task, their graph
+// neighborhood, and git co-change history — and lets the agent navigate.
 
-function runBrief(task, { root = process.cwd() } = {}) {
+function loadGraphForTask(root, cmd) {
   const graphPath = path.join(root, '.vectora', 'graph.json');
 
-  // Auto-heal: check dirty flag and stale graph before generating brief
+  // Auto-heal: reload on the dirty flag, then on a git HEAD change.
   const dirtyPath = path.join(root, '.vectora', 'dirty');
   if (fs.existsSync(dirtyPath)) {
     runDiff({ silent: true, root });
@@ -1175,31 +1457,26 @@ function runBrief(task, { root = process.cwd() } = {}) {
   }
 
   if (!fs.existsSync(graphPath)) {
-    // Bootstrap: degraded banner
-    console.log('[VECTORA BRIEF]');
+    console.log('[VECTORA MAP]');
     console.log('╔─ vectora ─────────────────────────────────────────────╗');
-    console.log('│ ⚠ no graph — run `npx vectora init` to activate      │');
-    console.log('│ mode:      degraded (navigation disabled)             │');
+    console.log('│ ⚠ no graph — run `npx vectora init` to activate       │');
     console.log('╚───────────────────────────────────────────────────────╝');
-    console.log('');
-    console.log('skeleton_pool: 0');
-    console.log('PROPAGATION: prepend this brief to sub-agent prompts for coding tasks.');
-    console.log('[END VECTORA BRIEF]');
-    return;
+    console.log('Proceed by your own judgment, then run `npx vectora init`.');
+    console.log('[END VECTORA MAP]');
+    return null;
   }
 
   let graph;
   try { graph = JSON.parse(fs.readFileSync(graphPath, 'utf8')); }
   catch {
-    console.error('vectora brief: failed to parse graph.json — run `npx vectora init`');
+    console.error(`vectora ${cmd}: failed to parse graph.json — run \`npx vectora init\``);
     process.exit(1);
   }
 
-  // Staleness check: silently diff if stale
   if (graph.gitHash) {
     try {
       const current = execSync('git rev-parse HEAD', {
-        cwd: root, stdio: ['ignore','pipe','ignore'], timeout: 2000
+        cwd: root, stdio: ['ignore','pipe','ignore'], timeout: 2000,
       }).toString().trim();
       if (current !== graph.gitHash) {
         runDiff({ silent: true, root });
@@ -1207,184 +1484,699 @@ function runBrief(task, { root = process.cwd() } = {}) {
       }
     } catch {}
   }
+  return graph;
+}
 
-  const config = mergeConfig(loadConfig(root));
-  const TOKEN_BUDGET = config.tokenBudget || 2000;
+function runMap(task, { root = process.cwd() } = {}) {
+  const graph = loadGraphForTask(root, 'map');
+  if (!graph) return;
 
-  // Detect if task is chained (multiple distinct sub-tasks)
-  const subTasks = detectChain(task);
+  const matched = findSeeds(graph.files || [], task);
+  const seeds = matched.slice(0, 6);
+  const observedPeers = observedPeersMap(loadObserved(root));
+  const nb = expandNeighborhood(seeds, graph, observedPeers);
 
-  if (subTasks && subTasks.length >= 2) {
-    emitChainedBrief(task, subTasks, graph, TOKEN_BUDGET, root);
+  emitMap(task, graph, seeds, nb, root);
+
+  // Persist what we surfaced so `vectora check` can produce an honest receipt.
+  persistLastMap(root, {
+    task,
+    generatedAt: new Date().toISOString(),
+    gitHash: graph.gitHash || null,
+    seeds: seeds.map(s => s.path),
+    coChange: nb.coChange,
+  });
+}
+
+// Transparent seed matching: which files does the task text name directly?
+// Every match carries a human-readable reason. No hidden weights, no rule tables.
+function findSeeds(files, task) {
+  const taskTokens = new Set(tokenize(task));
+  const taskLower = task.toLowerCase();
+  const out = [];
+
+  for (const f of files) {
+    const reasons = [];
+    let rank = 0;
+    const filename = path.basename(f.path);
+    const stem = path.basename(f.path, path.extname(f.path));
+
+    if (f.path.length > 3 && taskLower.includes(f.path.toLowerCase())) {
+      reasons.push('path named in task'); rank += 5;
+    } else if (stem.length > 2 && taskLower.includes(filename.toLowerCase())) {
+      reasons.push('filename named in task'); rank += 4;
+    }
+
+    const stemHits = tokenize(stem).filter(t => taskTokens.has(t));
+    if (stemHits.length) { reasons.push('filename match'); rank += 2 * stemHits.length; }
+
+    const expHits = [];
+    for (const exp of (f.exports || [])) {
+      if (tokenize(exp).some(t => taskTokens.has(t))) expHits.push(exp);
+    }
+    if (expHits.length) { reasons.push('exports ' + expHits.slice(0, 3).join(', ')); rank += expHits.length; }
+
+    let strHit = false;
+    for (const s of (f.stringLiterals || [])) {
+      if (tokenize(s).some(t => taskTokens.has(t))) { strHit = true; break; }
+    }
+    if (strHit) { reasons.push('string-literal match'); rank += 1; }
+
+    if (reasons.length) {
+      out.push({ path: f.path, reasons, rank, inDegree: f.inDegree || 0 });
+    }
+  }
+
+  out.sort((a, b) => b.rank - a.rank || b.inDegree - a.inDegree);
+  return out;
+}
+
+// For the seed set, pull the graph neighborhood: forward imports, reverse
+// importers, and co-change peers. Co-change merges two independent signals —
+// git history (graph.coChangePeers) and the session ledger (observedPeers) —
+// into one list, each pair tagged with its provenance. Neither replaces the
+// other: git carries it when the ledger is empty; the ledger carries it on a
+// repo with no git history.
+function expandNeighborhood(seeds, graph, observedPeers = new Map()) {
+  const files = graph.files || [];
+  const byPath = new Map(files.map(f => [f.path, f]));
+  const seedSet = new Set(seeds.map(s => s.path));
+
+  const neighbors = new Map(); // path -> { relations:Set, inDegree }
+  const addNeighbor = (p, rel) => {
+    if (!p || seedSet.has(p) || !byPath.has(p)) return;
+    if (!neighbors.has(p)) {
+      neighbors.set(p, { relations: new Set(), inDegree: byPath.get(p).inDegree || 0 });
+    }
+    neighbors.get(p).relations.add(rel);
+  };
+
+  // Merge git + session pairs keyed by the unordered pair.
+  const pairMap = new Map(); // "a|b" -> { a, b, sharedCommits, sessionCommits }
+  const addPair = (a, b, gitN, sessN, base) => {
+    addNeighbor(b, `co-changes with ${base}`);
+    const key = [a, b].sort().join('|');
+    const e = pairMap.get(key) || { a, b, sharedCommits: 0, sessionCommits: 0 };
+    if (gitN)  e.sharedCommits  = Math.max(e.sharedCommits, gitN);
+    if (sessN) e.sessionCommits = Math.max(e.sessionCommits, sessN);
+    pairMap.set(key, e);
+  };
+
+  for (const s of seeds) {
+    const f = byPath.get(s.path);
+    if (!f) continue;
+    const base = path.basename(s.path);
+    for (const p of (f.importsResolved || [])) addNeighbor(p, `imported by ${base}`);
+    for (const p of (f.importedBy || []))     addNeighbor(p, `imports ${base}`);
+    for (const peer of (f.coChangePeers || [])) addPair(s.path, peer.partner, peer.sharedCommits, 0, base);
+    for (const peer of (observedPeers.get(s.path) || [])) {
+      if (byPath.has(peer.partner)) addPair(s.path, peer.partner, 0, peer.sessionCommits, base);
+    }
+  }
+
+  const list = [...neighbors.entries()]
+    .map(([p, v]) => ({ path: p, relations: [...v.relations], inDegree: v.inDegree }))
+    .sort((a, b) => b.inDegree - a.inDegree);
+
+  const coChange = [...pairMap.values()]
+    .sort((a, b) => (b.sharedCommits + b.sessionCommits) - (a.sharedCommits + a.sessionCommits));
+  return { neighbors: list, coChange };
+}
+
+// ─── Session-observed coupling ledger ─────────────────────────────────────────
+// `.vectora/observed.json` records pairs of files YOU edited together, tallied
+// across sessions. It supplements git co-change and, on a repo with no history,
+// stands in for it entirely. Per-developer signal — not meant to be committed.
+
+function loadObserved(root) {
+  const p = path.join(root, '.vectora', 'observed.json');
+  try {
+    const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return (d && typeof d.pairs === 'object') ? d : { pairs: {} };
+  } catch { return { pairs: {} }; }
+}
+
+function observedPeersMap(observed) {
+  const map = new Map(); // path -> [{ partner, sessionCommits }]
+  for (const [key, count] of Object.entries(observed.pairs || {})) {
+    const [a, b] = key.split('|');
+    if (!a || !b) continue;
+    if (!map.has(a)) map.set(a, []);
+    if (!map.has(b)) map.set(b, []);
+    map.get(a).push({ partner: b, sessionCommits: count });
+    map.get(b).push({ partner: a, sessionCommits: count });
+  }
+  return map;
+}
+
+// Record the files edited together in this task. Mirrors the git co-change
+// noise filter: a sprawling edit (> maxFiles) says nothing about real coupling.
+function recordObserved(root, editedFiles, maxFiles = 15) {
+  const files = [...new Set(editedFiles)].filter(f => SOURCE_EXTENSIONS.test(f));
+  if (files.length < 2 || files.length > maxFiles) return;
+  const observed = loadObserved(root);
+  observed.pairs = observed.pairs || {};
+  for (let i = 0; i < files.length; i++) {
+    for (let j = i + 1; j < files.length; j++) {
+      const key = [files[i], files[j]].sort().join('|');
+      observed.pairs[key] = (observed.pairs[key] || 0) + 1;
+    }
+  }
+  observed.updated = new Date().toISOString();
+  try {
+    fs.mkdirSync(path.join(root, '.vectora'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.vectora', 'observed.json'), JSON.stringify(observed, null, 2), 'utf8');
+  } catch {}
+}
+
+function emitMap(task, graph, seeds, nb, root) {
+  const files = graph.files || [];
+  const byPath = new Map(files.map(f => [f.path, f]));
+  const label = graph.projectMeta?.label || graph.language || 'codebase';
+  const pad = (s, n) => String(s).length > n ? String(s).slice(0, n) : String(s).padEnd(n);
+
+  console.log('[VECTORA MAP]');
+  const head = seeds.length
+    ? `${seeds.length} seed${seeds.length > 1 ? 's' : ''} matched your task`
+    : 'no keyword match — most central files shown as entry points';
+  const banner = `╔─ vectora · ${label} `;
+  console.log(banner + '─'.repeat(Math.max(0, 65 - banner.length)) + '╗');
+  console.log(`│ ${pad(head, 61)} │`);
+  console.log('╚' + '─'.repeat(63) + '╝');
+  console.log('');
+
+  // DANGER ZONES — surfaces @vectora danger: annotations before anything else.
+  // These are co-located with the code they guard; the agent must see them first.
+  const dangersInScope = [];
+  const seedAndCoChangePaths = new Set([
+    ...seeds.map(s => s.path),
+    ...nb.coChange.flatMap(c => [c.a, c.b]),
+  ]);
+  for (const fp of seedAndCoChangePaths) {
+    const f = byPath.get(fp);
+    if (f && f.dangerZones && f.dangerZones.length) {
+      for (const dz of f.dangerZones) dangersInScope.push({ file: fp, text: dz });
+    }
+  }
+  if (dangersInScope.length) {
+    console.log('⚠ DANGER ZONES — constraints on files in your edit scope:');
+    for (const { file, text } of dangersInScope) {
+      console.log(`  ⚠ ${shortPath(file)}: "${text}"`);
+    }
+    console.log('');
+  }
+
+  // CO-CHANGE leads — it's the signal the agent cannot compute on its own.
+  console.log('CO-CHANGE (edited together in git history + your sessions — grep cannot reveal these):');
+  if (nb.coChange.length === 0) {
+    console.log('  (none yet — no git co-change and no session history for these seeds)');
   } else {
-    emitSingleBrief(task, graph, TOKEN_BUDGET, root);
-  }
-}
-
-function detectChain(task) {
-  // Split on clear chaining signals: ", then", "; then", "after that", numbered list
-  const patterns = [
-    /,\s+then\s+/i,
-    /;\s+(?:then\s+)?/,
-    /\s+and\s+then\s+/i,
-    /\s+after\s+(?:that|which),?\s+/i,
-    /\s+(?:next|following\s+that),?\s+/i,
-    /\.\s+(?=[A-Z](?:dd|efactor|ix|pdate|reate|emove))/,
-  ];
-  for (const pat of patterns) {
-    const parts = task.split(pat).map(p => p.trim()).filter(p => p.length > 4);
-    if (parts.length >= 2) return parts;
-  }
-  return null;
-}
-
-function scoreFile(f, taskTokens, taskLower) {
-  let score = 0;
-  const filename = path.basename(f.path);
-  const stem = path.basename(f.path, path.extname(f.path));
-
-  // Signal 1: explicit path or filename in task text
-  if (taskLower.includes(f.path.toLowerCase())) score += 1.0;
-  else if (taskLower.includes(filename.toLowerCase())) score += 0.8;
-
-  // Signal 2: file stem token overlap
-  const stemTokens = tokenize(stem);
-  if (stemTokens.length > 0) {
-    let hits = 0;
-    for (const t of stemTokens) { if (taskTokens.has(t)) hits++; }
-    score += (hits / stemTokens.length) * 0.5;
-  }
-
-  // Signal 3: export name overlap
-  const exps = f.exports || [];
-  let expHits = 0;
-  for (const exp of exps) {
-    for (const t of tokenize(exp)) { if (taskTokens.has(t)) { expHits++; break; } }
-  }
-  score += Math.min(expHits * 0.1, 0.4);
-
-  // Signal 4: directory path segment overlap
-  const segments = f.path.split('/').slice(0, -1);
-  for (const seg of segments) {
-    for (const t of tokenize(seg)) { if (taskTokens.has(t)) { score += 0.15; break; } }
-  }
-
-  // Signal 5: package domain signal overlap
-  for (const pkgDomain of (f.packageSignals || [])) {
-    if (taskTokens.has(pkgDomain)) score += 0.3;
-  }
-
-  // Signal 6: identifier overlap (new — semantic vocabulary)
-  for (const id of (f.allIdentifiers || [])) {
-    if (taskTokens.has(id)) { score += 0.08; }
-  }
-
-  // Signal 7: string literal overlap (route paths, error messages)
-  for (const str of (f.stringLiterals || [])) {
-    for (const t of tokenize(str)) { if (taskTokens.has(t)) { score += 0.06; break; } }
-  }
-
-  // Signal 8: comment term overlap
-  for (const term of (f.commentTerms || [])) {
-    if (taskTokens.has(term)) { score += 0.04; }
-  }
-
-  // Signal 9: small pivot bonus as tie-breaker
-  if (f.isPivot) score += 0.05;
-
-  return score;
-}
-
-function selectFiles(scored, TOKEN_BUDGET) {
-  const FULL_LOAD_CAP = 12;
-
-  // Dynamic threshold: on small repos (<= 10 files), lower the bar so
-  // the top-scoring file is always included when it has ANY relevance.
-  // On larger repos, keep the 0.2 floor to avoid loading irrelevant files.
-  const maxScore = scored.length > 0 ? scored[0]._score : 0;
-  let FULL_LOAD_THRESHOLD = 0.2;
-  if (scored.length <= 10 && maxScore > 0 && maxScore < FULL_LOAD_THRESHOLD) {
-    // Lower threshold to half the max score, minimum 0.03
-    FULL_LOAD_THRESHOLD = Math.max(maxScore * 0.5, 0.03);
-  }
-
-  let fullLoadFiles = scored.filter(f => f._score >= FULL_LOAD_THRESHOLD);
-
-  // Apply token budget
-  let budgetUsed = 0;
-  const budgetedFullLoad = [];
-  for (const f of fullLoadFiles) {
-    const cost = Math.floor(f.charCount / 4);
-    if (budgetUsed + cost <= TOKEN_BUDGET) {
-      budgetedFullLoad.push(f);
-      budgetUsed += cost;
-    }
-    if (budgetedFullLoad.length >= FULL_LOAD_CAP) break;
-  }
-  fullLoadFiles = budgetedFullLoad;
-
-  // Fallback: no strong matches at all
-  if (fullLoadFiles.length === 0) {
-    const weakMatches = scored.filter(f => f._score > 0);
-    const pool = weakMatches.length > 0 ? weakMatches : scored;
-    let b = 0;
-    for (const f of pool.slice(0, FULL_LOAD_CAP)) {
-      const cost = Math.floor(f.charCount / 4);
-      if (b + cost > TOKEN_BUDGET) break;
-      fullLoadFiles.push(f);
-      b += cost;
+    const seenCC = new Set();
+    for (const c of nb.coChange) {
+      const key = [c.a, c.b].sort().join('|');
+      if (seenCC.has(key)) continue;
+      seenCC.add(key);
+      console.log(`  ${pad(shortPath(c.a) + ' + ' + shortPath(c.b), 50)} ${coChangeLabel(c)}`);
+      if (seenCC.size >= 8) break;
     }
   }
 
-  const fullLoadPaths = new Set(fullLoadFiles.map(f => f.path));
-  const fullLoadDirs  = new Set(fullLoadFiles.map(f => path.dirname(f.path)));
-
-  const SKELETON_CAP = 25;
-  const skeletonFiles = scored
-    .filter(f => !fullLoadPaths.has(f.path))
-    .filter(f => f._score > 0 || fullLoadDirs.has(path.dirname(f.path)))
-    .slice(0, SKELETON_CAP);
-
-  // Barrels always appear in skeletons if they're in the matched domain
-  for (const f of scored) {
-    if (f.isBarrel && !fullLoadPaths.has(f.path) && !skeletonFiles.find(s => s.path === f.path)) {
-      if (fullLoadDirs.has(path.dirname(f.path))) skeletonFiles.push(f);
+  console.log('');
+  console.log('START HERE (open by your own judgment — nothing is hidden):');
+  if (seeds.length) {
+    for (const s of seeds) {
+      const f = byPath.get(s.path);
+      const meta = f ? `[${f.lineCount} lines · in:${f.inDegree || 0}]` : '';
+      console.log(`  ${pad(s.path, 44)} ${meta}  (${s.reasons.join('; ')})`);
+      if (f) {
+        const reach = transitiveDependents(graph, s.path).size;
+        if (reach >= 5) console.log(`  ${' '.repeat(44)} ⚠ blast radius: ${reach} dependents — edit exported signatures with care`);
+      }
+    }
+  } else {
+    const central = [...files].sort((a, b) => (b.inDegree || 0) - (a.inDegree || 0)).slice(0, 5);
+    for (const f of central) {
+      console.log(`  ${pad(f.path, 44)} [${f.lineCount} lines · in:${f.inDegree || 0}]  (central)`);
     }
   }
 
-  // Follow semantic edges: if a file is fully loaded, pull its semantic edges into skeletons
-  for (const f of fullLoadFiles) {
-    if (f.semanticEdges && Array.isArray(f.semanticEdges)) {
-      for (const edgePath of f.semanticEdges) {
-        if (!fullLoadPaths.has(edgePath) && !skeletonFiles.find(s => s.path === edgePath)) {
-          const edgeFile = scored.find(s => s.path === edgePath);
-          if (edgeFile) skeletonFiles.push(edgeFile);
-        }
+  console.log('');
+  console.log('NEIGHBORHOOD (graph-connected — may be relevant):');
+  if (nb.neighbors.length === 0) {
+    console.log('  (none — seeds have no resolved import edges)');
+  } else {
+    for (const n of nb.neighbors.slice(0, 6)) {
+      const f = byPath.get(n.path);
+      const meta = f ? `[in:${f.inDegree || 0}]` : '';
+      console.log(`  ${pad(n.path, 44)} ${meta}  ${n.relations.slice(0, 2).join(', ')}`);
+    }
+    if (nb.neighbors.length > 6) console.log(`  …and ${nb.neighbors.length - 6} more (run \`npx vectora why <file>\` for details)`);
+  }
+
+  const seedDomains = [...new Set(seeds.map(s => byPath.get(s.path)?.domain).filter(Boolean))];
+  printDecisions(root, seedDomains);
+
+  console.log('');
+  console.log('When done, run `npx vectora check` — it catches incomplete edits even without this map.');
+  console.log('[END VECTORA MAP]');
+}
+
+function persistLastMap(root, data) {
+  try {
+    fs.mkdirSync(path.join(root, '.vectora'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.vectora', 'last-map.json'), JSON.stringify(data, null, 2), 'utf8');
+  } catch {}
+}
+
+// ─── Check (the honest receipt) ─────────────────────────────────────────────
+// Compares what was actually edited against the co-change links vectora surfaced.
+// Reports real assists and flags predicted peers that were left unedited.
+
+function runCheck({ root = process.cwd() } = {}) {
+  console.log('[VECTORA CHECK]');
+
+  // Load graph first — it's needed for all signals.
+  let graph = null;
+  const graphPath = path.join(root, '.vectora', 'graph.json');
+  if (fs.existsSync(graphPath)) {
+    try { graph = JSON.parse(fs.readFileSync(graphPath, 'utf8')); } catch {}
+  }
+
+  // Resolve the since-hash from last-map (if available). check works even
+  // without a prior map — that was the bug this fixes.
+  let sinceHash = null;
+  const lastMapPath = path.join(root, '.vectora', 'last-map.json');
+  let lastMapCoChange = [];
+  let lastMapTask = null;
+  if (fs.existsSync(lastMapPath)) {
+    try {
+      const last = JSON.parse(fs.readFileSync(lastMapPath, 'utf8'));
+      sinceHash = last.gitHash || null;
+      lastMapCoChange = last.coChange || [];
+      lastMapTask = last.task || null;
+    } catch {}
+  }
+
+  const edited = getEditedFiles(root, sinceHash);
+  if (edited.length === 0) {
+    console.log('  no edited source files detected (git working tree clean).');
+    console.log('[END VECTORA CHECK]');
+    return;
+  }
+  console.log(`  you edited: ${edited.map(e => shortPath(e)).join(', ')}`);
+
+  // Surface @vectora danger annotations on files you actually edited.
+  // These are the constraints most likely to matter right now.
+  if (graph) {
+    const byPathDanger = new Map((graph.files || []).map(f => [f.path, f]));
+    const dangers = [];
+    for (const ed of edited) {
+      const f = byPathDanger.get(ed);
+      if (f && f.dangerZones && f.dangerZones.length) {
+        for (const dz of f.dangerZones) dangers.push({ file: ed, text: dz });
+      }
+    }
+    if (dangers.length) {
+      console.log('');
+      console.log('  ⚠ DANGER ZONES — constraints on files you edited:');
+      for (const { file, text } of dangers) {
+        console.log(`  ⚠ ${shortPath(file)}: "${text}"`);
       }
     }
   }
 
-  return { fullLoadFiles, skeletonFiles, budgetUsed };
-}
+  const editedSet = new Set(edited);
 
-function computeSkeletonPool(skeletonFiles) {
-  return skeletonFiles.reduce((sum, f) => sum + Math.max(0, Math.floor(f.charCount / 4) - 30), 0);
-}
-
-function matchDomain(scored) {
-  const domainCounts = {};
-  for (const f of scored.filter(f => f._score > 0).slice(0, 10)) {
-    domainCounts[f.domain] = (domainCounts[f.domain] || 0) + f._score;
+  // ── 1. Confirmed breaks (✗ BROKEN — fix before finishing) ──────────────────
+  // Re-parse current signatures of edited JS/TS files from disk and check every
+  // importer's live call sites. A call passing fewer args than `required` and no
+  // spread is a proven inconsistency, not a guess.
+  const confirmedBreaks = confirmCallerBreaks(graph, edited, editedSet, root);
+  if (confirmedBreaks.length) {
+    console.log('');
+    console.log('  ✗ BROKEN — fix before finishing:');
+    for (const b of confirmedBreaks) {
+      console.log(`  ✗ ${shortPath(b.importer)} calls ${b.symbol}() with ${b.got} arg${b.got !== 1 ? 's' : ''} but it now requires ${b.required} — fix this call.`);
+    }
   }
-  const all = Object.entries(domainCounts).sort((a, b) => b[1] - a[1]);
-  const isFallback = all.length === 0;
-  return {
-    label: isFallback ? 'fallback (all pivots)' : all.map(([d]) => d).join(', '),
-    isFallback,
+
+  // ── 2. Co-change misses (⚠ forgot a file) ──────────────────────────────────
+  // Merge two independent sources:
+  //   a) map-derived pairs (last-map.json, filtered by edited files)
+  //   b) graph-derived peers for ALL edited files — fires even without a prior map
+  const seen = new Set();
+  const surfaced = [];
+  const misses = [];
+
+  const processPair = (a, b, sharedCommits, sessionCommits) => {
+    const key = [a, b].sort().join('|');
+    if (seen.has(key)) return;
+    seen.add(key);
+    const aEd = editedSet.has(a), bEd = editedSet.has(b);
+    if (aEd && bEd) surfaced.push({ a, b, sharedCommits, sessionCommits });
+    else if (aEd !== bEd) misses.push({ sharedCommits, sessionCommits, missing: aEd ? b : a, anchor: aEd ? a : b });
   };
+
+  for (const c of lastMapCoChange) processPair(c.a, c.b, c.sharedCommits || 0, c.sessionCommits || 0);
+  if (graph) {
+    const observedPeers = observedPeersMap(loadObserved(root));
+    const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+    for (const ed of edited) {
+      const f = byPath.get(ed);
+      if (!f) continue;
+      for (const peer of (f.coChangePeers || [])) processPair(ed, peer.partner, peer.sharedCommits || 0, 0);
+      for (const peer of (observedPeers.get(ed) || [])) processPair(ed, peer.partner, 0, peer.sessionCommits || 0);
+    }
+  }
+
+  let reported = confirmedBreaks.length > 0;
+  if (surfaced.length) {
+    reported = true;
+    console.log('');
+    for (const c of surfaced) {
+      console.log(`  ✓ ${shortPath(c.a)} ↔ ${shortPath(c.b)}  (${coChangeLabel(c)}) — vectora linked these; you edited both.`);
+    }
+    console.log(`  vectora surfaced ${surfaced.length} link${surfaced.length > 1 ? 's' : ''} grep could not.`);
+  }
+  if (misses.length) {
+    reported = true;
+    misses.sort((a, b) => (b.sharedCommits + b.sessionCommits) - (a.sharedCommits + a.sessionCommits));
+    console.log('');
+    for (const m of misses.slice(0, 3)) {
+      console.log(`  ⚠ ${shortPath(m.missing)} co-changes with ${shortPath(m.anchor)} (${coChangeLabel(m)}) but was not edited — worth a look?`);
+    }
+  }
+
+  // ── 3. Soft caller warnings (⚠ verify — no arity proof) ────────────────────
+  // Importers that use an exported symbol from an edited file but weren't touched.
+  // These fall back to "verify?" for non-JS/TS files or when signature data is absent.
+  const confirmedImporters = new Set(confirmedBreaks.map(b => b.importer));
+  const callerWarnings = collectCallerWarnings(graph, edited, editedSet)
+    .filter(w => !confirmedImporters.has(w.importer)); // don't double-report
+  if (callerWarnings.length) {
+    reported = true;
+    console.log('');
+    console.log('  callers of what you changed (verify they still hold):');
+    for (const w of callerWarnings.slice(0, 5)) {
+      const sym = w.usedSymbols.length ? ` (uses ${w.usedSymbols.slice(0, 3).join(', ')})` : '';
+      console.log(`  ⚠ ${shortPath(w.importer)} imports ${shortPath(w.anchor)}${sym} but wasn't edited — verify?`);
+    }
+    if (callerWarnings.length > 5) console.log(`  …and ${callerWarnings.length - 5} more caller(s).`);
+  }
+
+  // ── 4. Test pairing (static, history-free) ─────────────────────────────────
+  const staleTests = [];
+  if (graph) {
+    const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+    for (const ed of edited) {
+      const f = byPath.get(ed);
+      if (!f || !f.testPath) continue;
+      if (!editedSet.has(f.testPath)) staleTests.push({ src: ed, test: f.testPath });
+    }
+    if (staleTests.length) {
+      reported = true;
+      console.log('');
+      console.log('  tests for code you changed (update them?):');
+      for (const t of staleTests.slice(0, 5)) {
+        console.log(`  ⚠ ${shortPath(t.src)} changed but ${shortPath(t.test)} wasn't — update the test?`);
+      }
+    }
+  }
+
+  if (!reported) {
+    console.log('  no co-change or caller links among your edits — your changes were structurally isolated.');
+  }
+
+  // Learn from this task + persist the ledger event.
+  recordObserved(root, edited);
+  recordLedger(root, {
+    task: lastMapTask,
+    editedFiles: edited,
+    confirmedBreaks: confirmedBreaks.length,
+    coChangeMisses: misses.length,
+    callerWarnings: callerWarnings.length,
+    staleTests: staleTests.length,
+    items: [
+      ...confirmedBreaks.map(b => ({ type: 'break', file: b.importer, detail: `${b.symbol}() got ${b.got}, needs ${b.required}` })),
+      ...misses.map(m => ({ type: 'cochange', file: m.missing, detail: `co-changes with ${shortPath(m.anchor)}` })),
+      ...callerWarnings.slice(0, 5).map(w => ({ type: 'caller', file: w.importer, detail: `imports ${shortPath(w.anchor)}` })),
+      ...staleTests.map(t => ({ type: 'test', file: t.test, detail: `test for ${shortPath(t.src)}` })),
+    ],
+  });
+
+  // Significant architectural event detection: new files created or broad structural
+  // impact (many peers flagged) suggests the agent made a generalisable decision worth
+  // capturing as a rule. This gives the skill a concrete signal without LLM inference.
+  const archSignal = detectSignificantEvent(root, edited, misses.length, callerWarnings.length);
+  if (archSignal) {
+    console.log('');
+    console.log('[ARCHITECTURAL SIGNAL]');
+    console.log(`  ${archSignal}`);
+    console.log('  → Did this task establish a pattern worth keeping? If so, propose:');
+    console.log('    /vectora learn "<the rule you just established>"');
+    console.log('[END ARCHITECTURAL SIGNAL]');
+  }
+
+  // Regression memory: if a co-change miss has recurred 3+ times in 30 days,
+  // propose baking it into decisions.json via /vectora learn.
+  const regressionProposals = detectRegressionPatterns(root, edited);
+  if (regressionProposals.length) {
+    console.log('');
+    console.log('  ↺ REGRESSION PATTERN — this keeps happening:');
+    for (const p of regressionProposals) {
+      console.log(`  ↺ "${shortPath(p.file)}" co-change missed ${p.count}× in 30 days when editing "${p.anchor}".`);
+      console.log(`     Propose: /vectora learn "${p.file} always needs update when ${p.anchor} changes"`);
+    }
+  }
+
+  console.log('[END VECTORA CHECK]');
 }
 
-function fmtTok(n) { return `~${n} tok`; }
+// ─── Ledger ───────────────────────────────────────────────────────────────────
+// Per-developer, per-project record of incomplete edits flagged. Not committed.
+// Every entry is a real, inspectable event — no invented percentages.
+
+function recordLedger(root, summary) {
+  const p = path.join(root, '.vectora', 'ledger.json');
+  let d = { events: [] };
+  try { d = JSON.parse(fs.readFileSync(p, 'utf8')); if (!Array.isArray(d.events)) d.events = []; }
+  catch {}
+  const total = summary.confirmedBreaks + summary.coChangeMisses + summary.callerWarnings + summary.staleTests;
+  if (total === 0) return; // nothing to record — don't pollute the ledger with clean runs
+  d.events.push({ ts: new Date().toISOString(), ...summary });
+  try { fs.writeFileSync(p, JSON.stringify(d, null, 2), 'utf8'); } catch {}
+}
+
+function runReceipts({ root = process.cwd() } = {}) {
+  const p = path.join(root, '.vectora', 'ledger.json');
+  if (!fs.existsSync(p)) {
+    console.log('[VECTORA RECEIPTS]');
+    console.log('  no receipts yet — run /vectora check after a task to start tracking.');
+    console.log('[END VECTORA RECEIPTS]');
+    return;
+  }
+  let d;
+  try { d = JSON.parse(fs.readFileSync(p, 'utf8')); } catch {
+    console.log('[VECTORA RECEIPTS]\n  could not read ledger.\n[END VECTORA RECEIPTS]'); return;
+  }
+  const events = d.events || [];
+  const totals = { confirmedBreaks: 0, coChangeMisses: 0, callerWarnings: 0, staleTests: 0 };
+  for (const e of events) {
+    totals.confirmedBreaks  += e.confirmedBreaks  || 0;
+    totals.coChangeMisses   += e.coChangeMisses   || 0;
+    totals.callerWarnings   += e.callerWarnings   || 0;
+    totals.staleTests       += e.staleTests       || 0;
+  }
+  const grand = totals.confirmedBreaks + totals.coChangeMisses + totals.callerWarnings + totals.staleTests;
+  const W = 63;
+  const pad = (s) => String(s).padEnd(W);
+  console.log('[VECTORA RECEIPTS]');
+  console.log('╔─ vectora receipts ────────────────────────────────────────────╗');
+  console.log(`│ ${pad(`${grand} incomplete edit${grand !== 1 ? 's' : ''} flagged across ${events.length} task${events.length !== 1 ? 's' : ''}`)}│`);
+  if (totals.confirmedBreaks) console.log(`│ ${pad(`  ✗ ${totals.confirmedBreaks} confirmed break${totals.confirmedBreaks !== 1 ? 's' : ''} (arity mismatch — would have failed)`)}│`);
+  if (totals.coChangeMisses)  console.log(`│ ${pad(`  ⚠ ${totals.coChangeMisses} forgotten co-change file${totals.coChangeMisses !== 1 ? 's' : ''}`)}│`);
+  if (totals.callerWarnings)  console.log(`│ ${pad(`  ⚠ ${totals.callerWarnings} caller${totals.callerWarnings !== 1 ? 's' : ''} to verify`)}│`);
+  if (totals.staleTests)      console.log(`│ ${pad(`  ⚠ ${totals.staleTests} stale test${totals.staleTests !== 1 ? 's' : ''}`)}│`);
+  console.log('╚───────────────────────────────────────────────────────────────╝');
+  const recent = events.slice(-5).reverse();
+  if (recent.length) {
+    console.log('');
+    console.log('  recent tasks:');
+    for (const e of recent) {
+      const n = (e.confirmedBreaks || 0) + (e.coChangeMisses || 0) + (e.callerWarnings || 0) + (e.staleTests || 0);
+      const date = new Date(e.ts).toLocaleDateString();
+      const parts = [];
+      if (e.confirmedBreaks) parts.push(`${e.confirmedBreaks} broken`);
+      if (e.coChangeMisses)  parts.push(`${e.coChangeMisses} co-change`);
+      if (e.callerWarnings)  parts.push(`${e.callerWarnings} caller`);
+      if (e.staleTests)      parts.push(`${e.staleTests} test`);
+      console.log(`    ${date}  ${n} flagged  (${parts.join(', ')})`);
+    }
+  }
+  console.log('[END VECTORA RECEIPTS]');
+}
+
+// Human-readable provenance for a co-change link. git history and the session
+// ledger (#4) are merged into one signal but always shown with their source.
+function coChangeLabel(c) {
+  const parts = [];
+  if (c.sharedCommits) parts.push(`git ${c.sharedCommits}×`);
+  if (c.sessionCommits) parts.push(`sessions ${c.sessionCommits}×`);
+  if (!parts.length) parts.push(`co-change ${c.sharedCommits || 0}×`);
+  return parts.join(' · ');
+}
+
+// Static caller/consumer recall: importers of edited files that reference one of
+// the edited file's exported symbols but were not themselves edited. Restricting
+// to importers that actually USE an exported symbol keeps this precise (no
+// flagging of side-effect-only imports) and history-independent.
+function collectCallerWarnings(graph, edited, editedSet) {
+  if (!graph) return [];
+  const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+  const flagged = new Set();
+  const warnings = [];
+  for (const ed of edited) {
+    const f = byPath.get(ed);
+    if (!f) continue;
+    const exportNames = (f.exports || []).map(String);
+    if (exportNames.length === 0) continue;
+    for (const importer of (f.importedBy || [])) {
+      if (editedSet.has(importer) || flagged.has(importer)) continue;
+      const imp = byPath.get(importer);
+      if (!imp) continue;
+      const ids = new Set(imp.allIdentifiers || []);
+      const usedSymbols = exportNames.filter(e => ids.has(e.toLowerCase()));
+      if (usedSymbols.length === 0) continue; // only real symbol consumers
+      flagged.add(importer);
+      warnings.push({ importer, anchor: ed, usedSymbols, inDegree: imp.inDegree || 0 });
+    }
+  }
+  warnings.sort((a, b) => b.usedSymbols.length - a.usedSymbols.length || b.inDegree - a.inDegree);
+  return warnings;
+}
+
+// Extract call-site argument counts from a source file, keyed by callee name
+// (lowercased). For each name: the calls observed, each with its positional
+// argument count and whether it spreads (`f(...args)` — unknowable arity).
+function extractCallArgs(raw) {
+  const ast = astFor(raw);
+  const calls = new Map(); // lowerName -> [{ count, spread }]
+  if (!ast) return calls;
+  walkAst(ast.program, (node) => {
+    if (node.type !== 'CallExpression') return;
+    let name = null;
+    if (node.callee?.type === 'Identifier') name = node.callee.name;
+    else if (node.callee?.type === 'MemberExpression' && node.callee.property?.name) name = node.callee.property.name;
+    if (!name) return;
+    const args = node.arguments || [];
+    const spread = args.some(a => a.type === 'SpreadElement');
+    const key = name.toLowerCase();
+    if (!calls.has(key)) calls.set(key, []);
+    calls.get(key).push({ count: args.length, spread });
+  });
+  return calls;
+}
+
+// Confirmed caller breaks: re-parse the edited file's CURRENT signatures and its
+// importers' CURRENT call sites from disk, and flag any call that passes fewer
+// positional args than the function now requires (no spread). Unlike
+// collectCallerWarnings ("verify?"), this is a definite inconsistency, not a
+// guess — the credibility core of `check`. JS/TS only.
+function confirmCallerBreaks(graph, edited, editedSet, root) {
+  if (!graph) return [];
+  const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+  const breaks = [];
+  const seen = new Set();
+  const readSrc = (rel) => {
+    try { return fs.readFileSync(path.join(root, rel), 'utf8'); } catch { return null; }
+  };
+  for (const ed of edited) {
+    if (!/\.(js|jsx|ts|tsx)$/.test(ed)) continue;
+    const f = byPath.get(ed);
+    if (!f || !(f.importedBy || []).length) continue;
+    const src = readSrc(ed);
+    if (src == null) continue;
+    const parsed = parseBabel(src, ed);
+    const sigs = parsed?.exportSignatures || {};
+    const required = Object.entries(sigs).filter(([, s]) => s.required > 0);
+    if (!required.length) continue;
+    for (const importer of f.importedBy) {
+      if (editedSet.has(importer)) continue;
+      const isrc = readSrc(importer);
+      if (isrc == null) continue;
+      const calls = extractCallArgs(isrc);
+      for (const [name, sig] of required) {
+        const sites = calls.get(name.toLowerCase());
+        if (!sites) continue;
+        const bad = sites.find(c => !c.spread && c.count < sig.required);
+        if (!bad) continue;
+        const key = importer + '|' + name;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        breaks.push({ importer, anchor: ed, symbol: name, required: sig.required, got: bad.count });
+      }
+    }
+  }
+  breaks.sort((a, b) => (a.required - a.got) - (b.required - b.got) === 0 ? 0 : (b.required - b.got) - (a.required - a.got));
+  return breaks;
+}
+
+// Returns a human-readable reason string when the current check looks like a
+// significant architectural event (new files created, or broad structural impact),
+// or null when nothing notable. The primary "is this worth learning?" judgment
+// stays with the agent/user — this just surfaces the structural evidence.
+function detectSignificantEvent(root, edited, coChangeMissCount, callerWarningCount) {
+  const run = (cmd) => {
+    try { return execSync(cmd, { cwd: root, stdio: ['ignore','pipe','ignore'], timeout: 3000 }).toString(); }
+    catch { return ''; }
+  };
+  const porcelain = run('git status --porcelain');
+  const newFiles = [];
+  for (const line of porcelain.split('\n')) {
+    if (!line.trim()) continue;
+    const xy = line.slice(0, 2);
+    if (xy === '??' || xy === 'A ' || xy === 'AM') {
+      const p = line.slice(3).trim().replace(/^"|"$/g, '');
+      if (SOURCE_EXTENSIONS.test(p)) newFiles.push(p);
+    }
+  }
+  if (newFiles.length >= 2) {
+    return `${newFiles.length} new source files created (${newFiles.slice(0, 3).map(f => path.basename(f)).join(', ')}${newFiles.length > 3 ? ', …' : ''}).`;
+  }
+  if (newFiles.length === 1 && edited.length >= 3) {
+    return `new file ${path.basename(newFiles[0])} + ${edited.length - 1} existing files touched — looks like a feature addition.`;
+  }
+  const structuralBreadth = coChangeMissCount + callerWarningCount;
+  if (structuralBreadth >= 4) {
+    return `${structuralBreadth} structural peers flagged (${coChangeMissCount} co-change + ${callerWarningCount} caller) — broad impact suggests an architectural refactor.`;
+  }
+  return null;
+}
+
+function getEditedFiles(root, sinceHash) {
+  const set = new Set();
+  const add = (out) => out.split('\n').map(l => l.trim())
+    .filter(l => l && SOURCE_EXTENSIONS.test(l)).forEach(l => set.add(l));
+  const run = (cmd) => {
+    try { return execSync(cmd, { cwd: root, stdio: ['ignore','pipe','ignore'], timeout: 3000 }).toString(); }
+    catch { return ''; }
+  };
+  add(run('git diff --name-only'));
+  add(run('git diff --name-only --cached'));
+  if (sinceHash) add(run(`git diff --name-only ${sinceHash} HEAD`));
+  // `git diff` misses untracked files — critical for new projects where the
+  // agent just created files. Parse porcelain status to catch those too.
+  const porcelain = run('git status --porcelain');
+  for (const line of porcelain.split('\n')) {
+    if (!line.trim()) continue;
+    let p = line.slice(3).trim();          // strip the 2-char status + space
+    if (p.includes(' -> ')) p = p.split(' -> ')[1].trim(); // renames
+    p = p.replace(/^"|"$/g, '');
+    if (SOURCE_EXTENSIONS.test(p)) set.add(p);
+  }
+  return [...set];
+}
+
 
 function printDecisions(root, domains) {
   const decisionsPath = path.join(root, '.vectora', 'decisions.json');
@@ -1415,211 +2207,490 @@ function printDecisions(root, domains) {
   }
 }
 
-// Verb prefixes for skeleton sentence generation — no API call, pure template NLG.
-const SKELETON_VERB_MAP = {
-  create: 'creates', generate: 'generates', build: 'builds', make: 'makes',
-  get: 'gets', fetch: 'fetches', load: 'loads', read: 'reads', find: 'finds', query: 'queries',
-  set: 'sets', update: 'updates', save: 'saves', write: 'writes', store: 'stores', put: 'puts',
-  delete: 'deletes', remove: 'removes', clear: 'clears', purge: 'purges',
-  validate: 'validates', verify: 'verifies', check: 'checks', parse: 'parses', assert: 'asserts',
-  handle: 'handles', process: 'processes', run: 'runs', execute: 'executes', dispatch: 'dispatches',
-  send: 'sends', emit: 'emits', publish: 'publishes', broadcast: 'broadcasts', notify: 'notifies',
-  authenticate: 'authenticates', authorize: 'authorizes', login: 'authenticates', sign: 'signs',
-  connect: 'connects', init: 'initializes', setup: 'sets up', configure: 'configures', boot: 'boots',
-  render: 'renders', format: 'formats', transform: 'transforms', convert: 'converts', map: 'maps',
-  log: 'logs', track: 'tracks', monitor: 'monitors', record: 'records',
-  hash: 'hashes', encrypt: 'encrypts', decrypt: 'decrypts',
-  charge: 'charges', pay: 'pays', refund: 'refunds', cancel: 'cancels',
-  register: 'registers', mount: 'mounts', route: 'routes', middleware: 'applies middleware for',
-  start: 'starts', stop: 'stops', restart: 'restarts', listen: 'listens',
-  upload: 'uploads', download: 'downloads', stream: 'streams',
-  schedule: 'schedules', queue: 'queues', retry: 'retries',
-};
 
-function buildSkeletonSentence(f) {
-  const exps = (f.exports || []).slice(0, 3);
-  const pkgs = (f.imports || []).filter(i => !i.startsWith('.')).slice(0, 2);
+// ─── Regression Pattern Detection ────────────────────────────────────────────
+// Scans the last 30 days of ledger events to find co-change misses that have
+// recurred 3+ times with the same anchor file. Surfaced at the end of `check`
+// as a proposal to bake the coupling into decisions.json via /vectora learn.
 
-  // Extract a verb from the first export name by splitting camelCase
-  let verb = null;
-  for (const exp of exps) {
-    const parts = exp.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/\W+/);
-    for (const p of parts) {
-      if (SKELETON_VERB_MAP[p]) { verb = SKELETON_VERB_MAP[p]; break; }
+function detectRegressionPatterns(root, editedFiles) {
+  const p = path.join(root, '.vectora', 'ledger.json');
+  if (!fs.existsSync(p)) return [];
+  let d;
+  try { d = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return []; }
+
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 3600 * 1000;
+  const recent = (d.events || []).filter(e => new Date(e.ts).getTime() > thirtyDaysAgo);
+
+  // "file was flagged as a miss when anchor was edited" — count per (file, anchor)
+  const missCounts = new Map();
+  for (const ev of recent) {
+    for (const item of (ev.items || [])) {
+      if (item.type !== 'cochange') continue;
+      // detail is "co-changes with <shortPath(anchor)>"
+      const anchorShort = item.detail.replace('co-changes with ', '');
+      const key = item.file + '|' + anchorShort;
+      missCounts.set(key, (missCounts.get(key) || 0) + 1);
     }
-    if (verb) break;
   }
 
-  const expsStr = exps.length ? exps.slice(0, 2).join(', ') : null;
-  const pkgsStr = pkgs.length ? `via ${pkgs.join(', ')}` : '';
-
-  if (verb && expsStr) return `${verb} ${expsStr}${pkgsStr ? ' ' + pkgsStr : ''}`;
-  if (expsStr)          return `exports ${expsStr}${pkgsStr ? ' ' + pkgsStr : ''}`;
-  if (pkgsStr)          return `uses ${pkgsStr}`;
-  return path.basename(f.path, path.extname(f.path));
+  const editedSet = new Set(editedFiles);
+  const proposals = [];
+  for (const [key, count] of missCounts) {
+    if (count < 3) continue;
+    const [file, anchorShort] = key.split('|');
+    // Only propose if the anchor (by short path) matches one of the files just edited
+    const anchorFull = editedFiles.find(ef => ef.endsWith(anchorShort) || shortPath(ef) === anchorShort);
+    if (!anchorFull || !editedSet.has(anchorFull)) continue;
+    proposals.push({ file, anchor: shortPath(anchorFull), count });
+  }
+  return proposals.slice(0, 2);
 }
 
-function emitSingleBrief(task, graph, TOKEN_BUDGET, root = process.cwd()) {
-  const { files = [] } = graph;
-  const taskTokens = new Set(tokenize(task));
-  const taskLower = task.toLowerCase();
+// ─── Manifest ─────────────────────────────────────────────────────────────────
+// Post-session causal receipt: why each file changed, what was left flagged,
+// and the lifetime proof that vectora made a difference. Paste into PR descriptions.
 
-  const scored = files.map(f => ({ ...f, _score: scoreFile(f, taskTokens, taskLower) }));
-  scored.sort((a, b) => b._score - a._score);
-
-  const { fullLoadFiles, skeletonFiles, budgetUsed } = selectFiles(scored, TOKEN_BUDGET);
-  const skeletonPool = computeSkeletonPool(skeletonFiles);
-  const { label: domainLabel, isFallback } = matchDomain(scored);
-
-  const pivotTok = budgetUsed;
-  const savedTok = skeletonPool;
-
-  // ── Emit banner-embedded brief ─────────────────────────────────────────────
-  console.log('[VECTORA BRIEF]');
-  if (isFallback) {
-    console.log('╔─ vectora ─────────────────────────────────────────────╗');
-    console.log('│ domain:    fallback (no strong match — all pivots)    │');
-    console.log(`│ loaded:    ${String(fullLoadFiles.length + ' pivots (' + fmtTok(pivotTok) + ')').padEnd(44)}│`);
-    console.log(`│ skipped:   ${String(skeletonFiles.length + ' files → skeletonized (' + fmtTok(savedTok) + ' saved)').padEnd(44)}│`);
-    console.log('╚───────────────────────────────────────────────────────╝');
-  } else {
-    console.log('╔─ vectora ─────────────────────────────────────────────╗');
-    console.log(`│ domain:    ${String(domainLabel).padEnd(44)}│`);
-    console.log(`│ loaded:    ${String(fullLoadFiles.length + ' pivots (' + fmtTok(pivotTok) + ')').padEnd(44)}│`);
-    console.log(`│ skipped:   ${String(skeletonFiles.length + ' files → skeletonized (' + fmtTok(savedTok) + ' saved)').padEnd(44)}│`);
-    console.log('╚───────────────────────────────────────────────────────╝');
+function runManifest({ root = process.cwd() } = {}) {
+  let graph = null;
+  const graphPath = path.join(root, '.vectora', 'graph.json');
+  if (fs.existsSync(graphPath)) {
+    try { graph = JSON.parse(fs.readFileSync(graphPath, 'utf8')); } catch {}
   }
 
-  if (fullLoadFiles.some(f => f.manualPivot)) {
-    console.log('  ✦ manually declared via @vectora pivot');
+  let task = '(unknown task — run /vectora map "<task>" before your next session)';
+  let lastMapCoChange = [];
+  let lastMapSeeds = [];
+  const lastMapPath = path.join(root, '.vectora', 'last-map.json');
+  if (fs.existsSync(lastMapPath)) {
+    try {
+      const lm = JSON.parse(fs.readFileSync(lastMapPath, 'utf8'));
+      if (lm.task) task = lm.task;
+      lastMapCoChange = lm.coChange || [];
+      lastMapSeeds = lm.seeds || [];
+    } catch {}
   }
 
+  let lifetimeSessions = 0, lifetimeBreaks = 0, lifetimeMisses = 0;
+  const ledgerPath = path.join(root, '.vectora', 'ledger.json');
+  if (fs.existsSync(ledgerPath)) {
+    try {
+      const ld = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+      const evs = ld.events || [];
+      lifetimeSessions = evs.length;
+      lifetimeBreaks  = evs.reduce((s, e) => s + (e.confirmedBreaks  || 0), 0);
+      lifetimeMisses  = evs.reduce((s, e) => s + (e.coChangeMisses   || 0), 0);
+    } catch {}
+  }
+
+  const edited = getEditedFiles(root, null);
+  const editedSet = new Set(edited);
+
+  console.log('[VECTORA MANIFEST]');
+  console.log(`Task: ${task}`);
   console.log('');
-  console.log('LOAD IN FULL:');
-  if (fullLoadFiles.length === 0) {
-    console.log('  (none — load files by best judgment)');
-  } else {
-    for (const f of fullLoadFiles) {
-      const tokEst = fmtTok(Math.floor(f.charCount / 4));
-      const summary = (f.exports || []).slice(0, 3).join(', ') || f.domain;
-      console.log(`  ${f.path.padEnd(40)} [${f.lineCount} lines, ${tokEst}]`);
+
+  if (edited.length === 0) {
+    console.log('  No edited source files detected (working tree clean).');
+    console.log('[END VECTORA MANIFEST]');
+    return;
+  }
+
+  const seedSet = new Set(lastMapSeeds);
+  const targeted = [];
+  const structural = [];
+  const notChanged = [];
+
+  if (graph) {
+    const byPath = new Map((graph.files || []).map(f => [f.path, f]));
+
+    for (const ed of edited) {
+      if (seedSet.has(ed)) {
+        targeted.push(ed);
+      } else {
+        const reasons = [];
+        // Was it a co-change partner of a seed?
+        for (const c of lastMapCoChange) {
+          const partner = c.a === ed ? c.b : c.b === ed ? c.a : null;
+          if (partner && editedSet.has(partner)) {
+            reasons.push(`co-change with ${shortPath(partner)} (${coChangeLabel(c)})`);
+          }
+        }
+        // Does it import or get imported by a seed?
+        const f = byPath.get(ed);
+        if (f) {
+          const importsTarget = (f.importsResolved || []).filter(i => seedSet.has(i));
+          if (importsTarget.length) reasons.push(`imports ${importsTarget.map(shortPath).join(', ')}`);
+          const importedByTarget = (f.importedBy || []).filter(i => seedSet.has(i));
+          if (importedByTarget.length) reasons.push(`imported by ${importedByTarget.map(shortPath).join(', ')}`);
+        }
+        structural.push({ file: ed, reason: reasons.length ? reasons.join('; ') : 'changed (reason unknown — run map first)' });
+      }
+    }
+
+    // Co-change pairs surfaced but NOT edited
+    const seen = new Set();
+    for (const c of lastMapCoChange) {
+      const key = [c.a, c.b].sort().join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const aEd = editedSet.has(c.a), bEd = editedSet.has(c.b);
+      if (aEd !== bEd) {
+        notChanged.push({ file: aEd ? c.b : c.a, reason: `co-changes with ${shortPath(aEd ? c.a : c.b)} (${coChangeLabel(c)})` });
+      }
+    }
+    // Graph-derived misses not already in the map list
+    for (const ed of edited) {
+      const f = byPath.get(ed);
+      if (!f) continue;
+      for (const peer of (f.coChangePeers || [])) {
+        if (!editedSet.has(peer.partner)) {
+          const key = [ed, peer.partner].sort().join('|');
+          if (!seen.has(key)) {
+            seen.add(key);
+            notChanged.push({ file: peer.partner, reason: `co-changes with ${shortPath(ed)} (git ${peer.sharedCommits}×)` });
+          }
+        }
+      }
     }
   }
 
-  console.log('');
-  console.log('SKELETON ONLY — emit these lines verbatim, do not open the files:');
-  if (skeletonFiles.length === 0) {
-    console.log('  (none)');
-  } else {
-    for (const f of skeletonFiles) {
-      const savedTokFile = Math.max(0, Math.floor(f.charCount / 4) - 30);
-      const barrel = f.isBarrel ? ' [barrel]' : '';
-      const sentence = buildSkeletonSentence(f);
-      console.log(`  // ${f.path} [${f.lineCount} lines, ~${savedTokFile} tok saved]${barrel} — ${sentence}`);
-    }
+  if (targeted.length) {
+    console.log('Directly targeted:');
+    for (const f of targeted) console.log(`  ${f}`);
+    console.log('');
+  }
+  if (structural.length) {
+    console.log('Changed because of structural coupling:');
+    for (const { file, reason } of structural) console.log(`  ${file}  ← ${reason}`);
+    console.log('');
+  }
+  if (notChanged.length) {
+    console.log('NOT changed (flagged, unresolved):');
+    for (const { file, reason } of notChanged.slice(0, 5)) console.log(`  ${file}  ← ${reason}`);
+    console.log('');
   }
 
-  printDecisions(root, [domainLabel]);
+  if (graph) {
+    let downstream = 0;
+    for (const ed of edited) downstream += transitiveDependents(graph, ed).size;
+    console.log(`Graph impact: ~${downstream} downstream dependent(s) across ${edited.length} edited file(s)`);
+  }
+  if (lifetimeSessions > 0) {
+    console.log(`Lifetime (this repo): ${lifetimeSessions} session${lifetimeSessions !== 1 ? 's' : ''} · ${lifetimeBreaks} confirmed break${lifetimeBreaks !== 1 ? 's' : ''} caught · ${lifetimeMisses} co-change miss${lifetimeMisses !== 1 ? 'es' : ''} flagged`);
+  }
 
-  console.log('');
-  console.log(`skeleton_pool: ${skeletonPool}`);
-  console.log('PROPAGATION: prepend this brief to sub-agent prompts for coding tasks.');
-  console.log('[END VECTORA BRIEF]');
+  console.log('[END VECTORA MANIFEST]');
 }
 
-function emitChainedBrief(task, subTasks, graph, TOKEN_BUDGET, root = process.cwd()) {
-  const { files = [] } = graph;
-  const subTaskResults = [];
+// ─── History ──────────────────────────────────────────────────────────────────
+// Regression memory: how often a file has appeared in check events, which files
+// it was edited with, and which co-change misses keep recurring. The longer you
+// use vectora, the smarter this gets about your repo's real coupling patterns.
 
-  // Score each sub-task independently
-  for (const subTask of subTasks) {
-    const taskTokens = new Set(tokenize(subTask));
-    const taskLower = subTask.toLowerCase();
-    const scored = files.map(f => ({ ...f, _score: scoreFile(f, taskTokens, taskLower) }));
-    scored.sort((a, b) => b._score - a._score);
-    const perBudget = Math.floor(TOKEN_BUDGET / subTasks.length);
-    const { fullLoadFiles, skeletonFiles } = selectFiles(scored, perBudget);
-    const { label: domainLabel } = matchDomain(scored);
-    subTaskResults.push({ subTask, fullLoadFiles, skeletonFiles, domainLabel });
+function runHistory(filepath, { root = process.cwd() } = {}) {
+  const ledgerPath = path.join(root, '.vectora', 'ledger.json');
+  console.log('[VECTORA HISTORY]');
+  if (!fs.existsSync(ledgerPath)) {
+    console.log('  no ledger yet — run /vectora check after a task to start tracking.');
+    console.log('[END VECTORA HISTORY]');
+    return;
   }
+  let d;
+  try { d = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')); }
+  catch { console.log('  could not read ledger.\n[END VECTORA HISTORY]'); return; }
 
-  // Find shared pivots (appear in 2+ sub-tasks)
-  const pivotCounts = new Map();
-  for (const { fullLoadFiles } of subTaskResults) {
-    for (const f of fullLoadFiles) {
-      pivotCounts.set(f.path, (pivotCounts.get(f.path) || 0) + 1);
-    }
-  }
-  const sharedPivots = [...pivotCounts.entries()]
-    .filter(([, count]) => count >= 2)
-    .map(([p]) => p);
-  const sharedPivotSet = new Set(sharedPivots);
+  const events = d.events || [];
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 3600 * 1000;
+  const lower = filepath.toLowerCase();
 
-  const totalPool = subTaskResults.reduce(
-    (sum, { skeletonFiles }) => sum + computeSkeletonPool(skeletonFiles), 0
+  // Events where this file was part of the edited set or flagged in items
+  const relevant = events.filter(ev =>
+    (ev.editedFiles || []).some(f => f.toLowerCase().includes(lower)) ||
+    (ev.items || []).some(i => i.file && i.file.toLowerCase().includes(lower))
   );
+  const recent30 = relevant.filter(ev => new Date(ev.ts).getTime() > thirtyDaysAgo);
 
-  // ── Emit chained banner ────────────────────────────────────────────────────
-  console.log('[VECTORA BRIEF]');
-  console.log('╔─ vectora ───────────────────────────────────────────────╗');
-  console.log(`│ chained tasks: ${String(subTasks.length).padEnd(40)}│`);
-  if (sharedPivots.length > 0) {
-    const spDisplay = sharedPivots.map(p => path.basename(p)).join(', ');
-    console.log(`│ shared pivots: ${String(spDisplay.length > 40 ? spDisplay.slice(0,37)+'...' : spDisplay + ' → once').padEnd(40)}│`);
-  }
-  console.log('│                                                         │');
-  for (let i = 0; i < subTaskResults.length; i++) {
-    const { fullLoadFiles, skeletonFiles, domainLabel } = subTaskResults[i];
-    const pivotTok = fullLoadFiles.reduce((s, f) => s + Math.floor(f.charCount / 4), 0);
-    const skTok = computeSkeletonPool(skeletonFiles);
-    console.log(`│ [${i+1}/${subTasks.length}] domain: ${String(domainLabel).padEnd(40)}│`);
-    console.log(`│       loaded:  ${String(fullLoadFiles.length + ' pivots (' + fmtTok(pivotTok) + ')').padEnd(40)}│`);
-    console.log(`│       skipped: ${String(skeletonFiles.length + ' files → skeletonized (' + fmtTok(skTok) + ' saved)').padEnd(40)}│`);
-    if (i < subTaskResults.length - 1) console.log('│                                                         │');
-  }
-  console.log('╚─────────────────────────────────────────────────────────╝');
-
-  if (sharedPivots.length > 0) {
-    console.log('');
-    console.log('SHARED (load first — do not reload per sub-task):');
-    for (const p of sharedPivots) {
-      const f = (graph.files || []).find(f => f.path === p);
-      if (f) console.log(`  ${f.path.padEnd(40)} [${f.lineCount} lines, ${fmtTok(Math.floor(f.charCount/4))}]`);
-    }
+  if (relevant.length === 0) {
+    console.log(`  "${filepath}" has not appeared in the ledger yet.`);
+    console.log('[END VECTORA HISTORY]');
+    return;
   }
 
-  for (let i = 0; i < subTaskResults.length; i++) {
-    const { subTask, fullLoadFiles, skeletonFiles } = subTaskResults[i];
-    console.log('');
-    console.log(`SUB-TASK ${i+1} — ${subTask}`);
-    console.log('LOAD IN FULL:');
-    const uniqueLoad = fullLoadFiles.filter(f => !sharedPivotSet.has(f.path));
-    if (uniqueLoad.length === 0) {
-      console.log('  (all pivots are shared — see SHARED above)');
-    } else {
-      for (const f of uniqueLoad) {
-        console.log(`  ${f.path.padEnd(40)} [${f.lineCount} lines, ${fmtTok(Math.floor(f.charCount/4))}]`);
-      }
-    }
-    console.log('SKELETON ONLY:');
-    if (skeletonFiles.length === 0) {
-      console.log('  (none)');
-    } else {
-      for (const f of skeletonFiles) {
-        const savedTokFile = Math.max(0, Math.floor(f.charCount / 4) - 30);
-        const sentence = buildSkeletonSentence(f);
-        console.log(`  // ${f.path} [${f.lineCount} lines, ~${savedTokFile} tok saved] — ${sentence}`);
-      }
-    }
-  }
-
-  const allDomains = [...new Set(subTaskResults.map(r => r.domainLabel))];
-  printDecisions(root, allDomains);
-
+  console.log(`  ${filepath}`);
+  console.log(`  Changed in ${recent30.length} task${recent30.length !== 1 ? 's' : ''} (last 30 days) · ${relevant.length} total.`);
   console.log('');
-  console.log(`skeleton_pool: ${totalPool}`);
-  console.log('PROPAGATION: prepend this brief to sub-agent prompts for coding tasks.');
-  console.log('[END VECTORA BRIEF]');
+
+  // Files co-edited with this file
+  const coEditCounts = new Map();
+  for (const ev of recent30) {
+    const others = (ev.editedFiles || []).filter(f => !f.toLowerCase().includes(lower));
+    for (const f of others) coEditCounts.set(f, (coEditCounts.get(f) || 0) + 1);
+  }
+  if (coEditCounts.size) {
+    const sorted = [...coEditCounts.entries()].sort((a, b) => b[1] - a[1]);
+    const total = recent30.length;
+    console.log('  Files edited in the same sessions:');
+    for (const [f, count] of sorted.slice(0, 6)) {
+      const freq = count === total ? '(always)' : count >= total * 0.7 ? '(usually)' : '(sometimes)';
+      console.log(`    ${f.padEnd(52)} ${count}/${total} sessions  ${freq}`);
+    }
+    console.log('');
+  }
+
+  // Co-change misses involving this file
+  const missCounts = new Map();
+  for (const ev of recent30) {
+    for (const item of (ev.items || [])) {
+      if (item.type !== 'cochange') continue;
+      const anchor = item.detail.replace('co-changes with ', '');
+      if (item.file.toLowerCase().includes(lower) || anchor.toLowerCase().includes(lower)) {
+        const miss = item.file.toLowerCase().includes(lower) ? anchor : item.file;
+        missCounts.set(miss, (missCounts.get(miss) || 0) + 1);
+      }
+    }
+  }
+  if (missCounts.size) {
+    console.log('  Co-change misses (flagged but not edited):');
+    for (const [f, count] of [...missCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)) {
+      console.log(`    ${f.padEnd(52)} flagged ${count}×`);
+    }
+    console.log('');
+    const topMiss = [...missCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+    if (topMiss[1] >= 3) {
+      console.log(`  This pair keeps recurring. To bake it into memory:`);
+      console.log(`  /vectora learn "${filepath} always needs update when ${topMiss[0]} changes"`);
+    }
+  }
+
+  console.log('[END VECTORA HISTORY]');
+}
+
+// ─── Preflight ────────────────────────────────────────────────────────────────
+// Pre-session situational awareness: open misses from last session, graph
+// staleness, global architectural constraints, and danger zone inventory.
+// Run before starting a new task to catch unresolved business from last time.
+
+function runPreflight({ root = process.cwd() } = {}) {
+  console.log('[VECTORA PREFLIGHT]');
+
+  const graphPath = path.join(root, '.vectora', 'graph.json');
+  if (!fs.existsSync(graphPath)) {
+    console.log('⚠ No graph found — run `npx vectora init` to activate vectora.');
+    console.log('[END VECTORA PREFLIGHT]');
+    return;
+  }
+  let graph;
+  try { graph = JSON.parse(fs.readFileSync(graphPath, 'utf8')); }
+  catch { console.log('⚠ Could not read graph.json — run `npx vectora init`.\n[END VECTORA PREFLIGHT]'); return; }
+
+  const config = mergeConfig(loadConfig(root));
+  let hasWarnings = false;
+
+  // 1. Graph staleness
+  const ageHours = graph.generated
+    ? (Date.now() - new Date(graph.generated).getTime()) / 3600000
+    : Infinity;
+  if (ageHours > config.refreshAfterHours) {
+    console.log(`⚠ Graph is ${Math.round(ageHours)}h old — run \`npx vectora diff\` for a fast update.`);
+    hasWarnings = true;
+  } else {
+    console.log(`✓ Graph is current (built ${Math.round(ageHours)}h ago).`);
+  }
+
+  // 2. Open co-change misses from last session
+  const ledgerPath = path.join(root, '.vectora', 'ledger.json');
+  if (fs.existsSync(ledgerPath)) {
+    try {
+      const ld = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+      const evs = ld.events || [];
+      const lastEv = evs[evs.length - 1];
+      if (lastEv && (lastEv.coChangeMisses > 0 || lastEv.confirmedBreaks > 0)) {
+        const misses = (lastEv.items || []).filter(i => i.type === 'cochange' || i.type === 'break');
+        console.log(`⚠ ${misses.length} unresolved item${misses.length !== 1 ? 's' : ''} from last session:`);
+        for (const m of misses.slice(0, 4)) {
+          console.log(`    ${m.file}  — ${m.detail}`);
+        }
+        hasWarnings = true;
+      } else {
+        console.log('✓ No open items from last session.');
+      }
+    } catch {}
+  }
+
+  // 3. Global architectural rules from decisions.json
+  const decisionsPath = path.join(root, '.vectora', 'decisions.json');
+  if (fs.existsSync(decisionsPath)) {
+    try {
+      const d = JSON.parse(fs.readFileSync(decisionsPath, 'utf8'));
+      const globals = d.global || [];
+      if (globals.length) {
+        console.log(`✓ ${globals.length} global constraint${globals.length !== 1 ? 's' : ''} active (will surface in map when relevant).`);
+      }
+    } catch {}
+  }
+
+  // 4. Danger zone inventory
+  const filesWithDanger = (graph.files || []).filter(f => f.dangerZones && f.dangerZones.length > 0);
+  if (filesWithDanger.length) {
+    console.log(`✓ ${filesWithDanger.length} file${filesWithDanger.length !== 1 ? 's have' : ' has'} @vectora danger annotations — surfaced automatically in map.`);
+  }
+
+  // 5. Circular imports
+  const cycles = detectCycles(graph);
+  if (cycles.length) {
+    console.log(`⚠ ${cycles.length} circular import${cycles.length !== 1 ? 's' : ''} in the graph — editing these files may cause unexpected behavior.`);
+    hasWarnings = true;
+  }
+
+  if (!hasWarnings) {
+    console.log('✓ All clear — ready to start a new task.');
+  }
+
+  console.log('[END VECTORA PREFLIGHT]');
+}
+
+// ─── Impact Report ────────────────────────────────────────────────────────────
+// 30-day summary: what vectora caught, files flagged most often, sessions count.
+// The shareable receipt that answers "was this worth installing?"
+
+function runImpactReport({ root = process.cwd() } = {}) {
+  const ledgerPath = path.join(root, '.vectora', 'ledger.json');
+  console.log('[VECTORA IMPACT-REPORT]');
+  if (!fs.existsSync(ledgerPath)) {
+    console.log('  no ledger yet — run /vectora check after a task to start tracking.');
+    console.log('[END VECTORA IMPACT-REPORT]');
+    return;
+  }
+  let d;
+  try { d = JSON.parse(fs.readFileSync(ledgerPath, 'utf8')); }
+  catch { console.log('  could not read ledger.\n[END VECTORA IMPACT-REPORT]'); return; }
+
+  const events = d.events || [];
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 3600 * 1000;
+  const recent = events.filter(e => new Date(e.ts).getTime() > thirtyDaysAgo);
+
+  const totals = { confirmedBreaks: 0, coChangeMisses: 0, callerWarnings: 0, staleTests: 0 };
+  const fileCounts = new Map();
+  const allEditedFiles = new Set();
+
+  for (const e of recent) {
+    totals.confirmedBreaks += e.confirmedBreaks || 0;
+    totals.coChangeMisses  += e.coChangeMisses  || 0;
+    totals.callerWarnings  += e.callerWarnings  || 0;
+    totals.staleTests      += e.staleTests      || 0;
+    for (const item of (e.items || [])) fileCounts.set(item.file, (fileCounts.get(item.file) || 0) + 1);
+    for (const f of (e.editedFiles || [])) allEditedFiles.add(f);
+  }
+
+  const grand = totals.confirmedBreaks + totals.coChangeMisses + totals.callerWarnings + totals.staleTests;
+  const monthStr = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+  const W = 63;
+  const pad = (s) => String(s).padEnd(W);
+
+  console.log(`╔─ vectora 30-day report · ${monthStr} ${'─'.repeat(Math.max(0, W - monthStr.length - 20))}╗`);
+  console.log(`│ ${pad(`${recent.length} session${recent.length !== 1 ? 's' : ''}  ·  ${allEditedFiles.size} distinct file${allEditedFiles.size !== 1 ? 's' : ''} edited`)}│`);
+  console.log(`│ ${pad('')}│`);
+  if (grand === 0) {
+    console.log(`│ ${pad('  No incomplete edits flagged this period.')}│`);
+  } else {
+    console.log(`│ ${pad('What vectora surfaced:')}│`);
+    if (totals.confirmedBreaks) console.log(`│ ${pad(`  ✗ ${totals.confirmedBreaks} confirmed break${totals.confirmedBreaks !== 1 ? 's' : ''} caught  (would have failed at runtime)`)}│`);
+    if (totals.coChangeMisses)  console.log(`│ ${pad(`  ⚠ ${totals.coChangeMisses} co-change link${totals.coChangeMisses !== 1 ? 's' : ''} used  (files edited after vectora flagged them)`)}│`);
+    if (totals.callerWarnings)  console.log(`│ ${pad(`  ⚠ ${totals.callerWarnings} caller${totals.callerWarnings !== 1 ? 's' : ''} warned`)}│`);
+    if (totals.staleTests)      console.log(`│ ${pad(`  ⚠ ${totals.staleTests} stale test${totals.staleTests !== 1 ? 's' : ''} flagged`)}│`);
+  }
+
+  if (fileCounts.size > 0) {
+    const topFile = [...fileCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+    console.log(`│ ${pad('')}│`);
+    console.log(`│ ${pad(`Highest-risk file: ${shortPath(topFile[0])}  (flagged ${topFile[1]}×)`)}│`);
+  }
+  console.log('╚' + '─'.repeat(W + 2) + '╝');
+
+  if (grand > 0) {
+    console.log('');
+    console.log(`  In 30 days, vectora flagged ${grand} incomplete edit${grand !== 1 ? 's' : ''} across ${recent.length} session${recent.length !== 1 ? 's' : ''}.`);
+    if (totals.confirmedBreaks) {
+      console.log(`  ${totals.confirmedBreaks} of those were proven arity breaks that would have failed at runtime.`);
+    }
+  }
+
+  console.log('[END VECTORA IMPACT-REPORT]');
+}
+
+// ─── Coupling Debt ────────────────────────────────────────────────────────────
+// Scored pair list: co-change frequency × shared imports − test coverage.
+// Makes "high coupling" concrete and trackable as a team metric.
+
+function runOverviewDebt({ root = process.cwd() } = {}) {
+  const graph = loadGraphForTask(root, 'overview');
+  if (!graph) return;
+  const files = graph.files || [];
+  const observed = loadObserved(root);
+  const byPath = new Map(files.map(f => [f.path, f]));
+
+  const pairMap = new Map(); // sorted "a|b" -> entry
+
+  const ensurePair = (a, b) => {
+    const key = [a, b].sort().join('|');
+    if (!pairMap.has(key)) pairMap.set(key, { a: [a, b].sort()[0], b: [a, b].sort()[1], coChange: 0, sessionChange: 0, sharedImports: 0, hasTests: false });
+    return pairMap.get(key);
+  };
+
+  // Git co-change pairs
+  for (const f of files) {
+    for (const peer of (f.coChangePeers || [])) {
+      const e = ensurePair(f.path, peer.partner);
+      e.coChange = Math.max(e.coChange, peer.sharedCommits || 0);
+    }
+  }
+  // Session-observed pairs
+  for (const [key, count] of Object.entries(observed.pairs || {})) {
+    const [a, b] = key.split('|');
+    if (!a || !b) continue;
+    const e = ensurePair(a, b);
+    e.sessionChange = Math.max(e.sessionChange, count);
+  }
+  // Shared import edges + test coverage
+  for (const [, e] of pairMap) {
+    const fa = byPath.get(e.a), fb = byPath.get(e.b);
+    if (!fa || !fb) continue;
+    const aImports = new Set(fa.importsResolved || []);
+    const bImports = new Set(fb.importsResolved || []);
+    let shared = 0;
+    for (const imp of aImports) { if (bImports.has(imp)) shared++; }
+    if (aImports.has(e.b) || bImports.has(e.a)) shared += 2;
+    e.sharedImports = shared;
+    e.hasTests = !!(fa.testPath || fb.testPath);
+  }
+
+  const scored = [...pairMap.values()]
+    .map(e => ({ ...e, score: ((e.coChange + e.sessionChange) * 3) + (e.sharedImports * 2) - (e.hasTests ? 5 : 0) }))
+    .filter(e => e.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  console.log('[VECTORA COUPLING DEBT]');
+  if (scored.length === 0) {
+    console.log('  No coupling debt detected — no co-change pairs found.');
+    console.log('[END VECTORA COUPLING DEBT]');
+    return;
+  }
+
+  console.log('  Highest-risk pairs (co-change × shared imports − test coverage):');
+  console.log('');
+  for (const e of scored.slice(0, 8)) {
+    console.log(`  ${shortPath(e.a)} ↔ ${shortPath(e.b)}   debt: ${e.score}`);
+    const parts = [];
+    if (e.coChange) parts.push(`git co-change: ${e.coChange}×`);
+    if (e.sessionChange) parts.push(`sessions: ${e.sessionChange}×`);
+    if (e.sharedImports) parts.push(`shared imports: ${e.sharedImports}`);
+    parts.push(e.hasTests ? 'has tests ✓' : 'no test coverage ✗');
+    console.log(`    ${parts.join('  ·  ')}`);
+    console.log('');
+  }
+  console.log(`  ${scored.length} pair${scored.length !== 1 ? 's' : ''} total. Reduce debt: add tests for high-scoring pairs, or /vectora learn to document the coupling.`);
+  console.log('[END VECTORA COUPLING DEBT]');
 }
 
 // ─── File Parsing ─────────────────────────────────────────────────────────────
@@ -1643,14 +2714,26 @@ function parseFile(filepath) {
 
   const ext = path.extname(filepath);
 
-  if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) return parseBabel(raw, filepath);
-  if (ext === '.py') return parsePython(raw, filepath);
-  if (ext === '.go') return parseGo(raw, filepath);
-  if (ext === '.rs') return parseRust(raw, filepath);
-  if (ext === '.rb') return parseRuby(raw, filepath);
+  let result;
+  if (['.js', '.jsx', '.ts', '.tsx'].includes(ext)) result = parseBabel(raw, filepath);
+  else if (ext === '.py') result = parsePython(raw, filepath);
+  else if (ext === '.go') result = parseGo(raw, filepath);
+  else if (ext === '.rs') result = parseRust(raw, filepath);
+  else if (ext === '.rb') result = parseRuby(raw, filepath);
+  else result = parseGeneric(raw, filepath);
 
-  // Generic fallback for unrecognised extensions
-  return parseGeneric(raw, filepath);
+  // Extract @vectora danger annotations from any language (// or # comment styles).
+  // Done here so all parsers get it for free without touching each one.
+  if (result) {
+    const dangerZones = [];
+    DANGER_ANNOTATION_RE.lastIndex = 0;
+    for (const m of raw.matchAll(DANGER_ANNOTATION_RE)) {
+      const text = m[1].trim();
+      if (text) dangerZones.push(text);
+    }
+    result.dangerZones = dangerZones;
+  }
+  return result;
 }
 
 function parsePython(raw, filepath) {
@@ -1750,8 +2833,30 @@ function parseBabel(raw, filepath) {
   const exports = [];
   const allIdentifiers = [];
   const stringLiterals = [];
+  const signatures = new Map(); // symbol name -> { required, max, hasRest }
+
+  const recordSig = (name, params) => {
+    if (name && Array.isArray(params) && !signatures.has(name)) signatures.set(name, arityOf(params));
+  };
 
   walkAst(ast.program, (node) => {
+    // Function/method/arrow signatures, keyed by their bound name. Used at
+    // `check` time to confirm caller arity breaks (not just guess).
+    if (node.type === 'FunctionDeclaration' && node.id?.name) recordSig(node.id.name, node.params);
+    if (node.type === 'VariableDeclarator' && node.id?.name &&
+        (node.init?.type === 'ArrowFunctionExpression' || node.init?.type === 'FunctionExpression')) {
+      recordSig(node.id.name, node.init.params);
+    }
+    if ((node.type === 'ClassMethod' || node.type === 'ObjectMethod') && node.key?.name) {
+      recordSig(node.key.name, node.params);
+    }
+    // `exports.foo = function(...)` / `module.exports.foo = (...) =>`
+    if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression' &&
+        node.left.property?.name &&
+        (node.right?.type === 'FunctionExpression' || node.right?.type === 'ArrowFunctionExpression')) {
+      recordSig(node.left.property.name, node.right.params);
+    }
+
     // ESM imports
     if (node.type === 'ImportDeclaration') { imports.push(node.source.value); return; }
 
@@ -1827,9 +2932,18 @@ function parseBabel(raw, filepath) {
   for (const id of allIdentifiers) idFreq.set(id, (idFreq.get(id) || 0) + 1);
   const topIds = [...idFreq.entries()].sort((a,b)=>b[1]-a[1]).slice(0,40).map(([id])=>id);
 
+  // Keep only signatures of names that are actually exported — that's all
+  // `check` can reason about from another file's call sites.
+  const exportSet = new Set(exports);
+  const exportSignatures = {};
+  for (const [name, sig] of signatures) {
+    if (exportSet.has(name)) exportSignatures[name] = sig;
+  }
+
   return {
     imports: [...new Set(imports)],
     exports: [...new Set(exports)],
+    exportSignatures,
     allIdentifiers: topIds,
     stringLiterals: stringLiterals.slice(0, 20),
     commentTerms: [...new Set(commentTerms)].slice(0, 40),
@@ -1837,6 +2951,32 @@ function parseBabel(raw, filepath) {
     charCount: raw.length,
     manualPivot,
   };
+}
+
+// Arity of a parameter list: how many leading args are required (before the
+// first default/optional), the max positional count, and whether it ends in a
+// rest param. A call passing fewer than `required` real args is a hard break.
+function arityOf(params) {
+  let required = 0, max = 0, hasRest = false, stillRequired = true;
+  for (const p of params || []) {
+    if (p.type === 'RestElement') { hasRest = true; continue; }
+    max++;
+    const optional = p.type === 'AssignmentPattern' || p.optional === true;
+    if (optional) stillRequired = false;
+    else if (stillRequired) required++;
+  }
+  return { required, max, hasRest };
+}
+
+// Parse JS/TS source to a Babel AST with vectora's standard plugin set, or null.
+function astFor(raw) {
+  try {
+    return require('@babel/parser').parse(raw, {
+      sourceType: 'module',
+      strictMode: false,
+      plugins: ['typescript', ['jsx', { throwIfNamespace: false }], 'importAssertions', 'decorators-legacy'],
+    });
+  } catch { return null; }
 }
 
 // ─── AST Walk ─────────────────────────────────────────────────────────────────
@@ -1870,45 +3010,17 @@ function isConfigFile(f) {
   return /\b(constants?|config|settings?|env|vars?|defaults?|conf)\b/i.test(name);
 }
 
-function isFrameworkForcedPivot(f, framework) {
-  const p = f.path;
-  if (framework === 'nextjs') {
-    return /\/(page|layout|actions|loading|error|middleware|route)\.(tsx?|jsx?)$/.test(p);
-  }
-  if (framework === 'django') {
-    return /(models|urls|views|settings|serializers|admin)\.py$/.test(p);
-  }
-  if (framework === 'nestjs') {
-    return /\.(module|controller|service|guard|interceptor|pipe)\.(ts|js)$/.test(p);
-  }
-  if (framework === 'express' || framework === 'fastify' || framework === 'node') {
-    return /(index|app|server|router|routes)\.(ts|js)$/.test(p);
-  }
-  if (framework === 'go') {
-    return /(?:^|\/)(main|cmd\/.+)\.go$/.test(p);
-  }
-  return false;
-}
-
-// ─── Package Domain Signals ───────────────────────────────────────────────────
-
-function getPackageSignals(imports) {
-  const signals = new Set();
-  for (const imp of imports) {
-    if (!imp || imp.startsWith('.')) continue;
-    const domain = PACKAGE_DOMAIN_SIGNALS[imp];
-    if (domain) signals.add(domain);
-    // Try first path segment for scoped packages
-    const first = imp.split('/')[0];
-    if (PACKAGE_DOMAIN_SIGNALS[first]) signals.add(PACKAGE_DOMAIN_SIGNALS[first]);
-  }
-  return [...signals];
-}
-
 // ─── Co-Change Graph ──────────────────────────────────────────────────────────
 
-function buildCoChangePeers(parsedFiles, root) {
+// Returns { peerMap, pairs }.
+//   peerMap: path → [{ partner, sharedCommits }]  (top peers per file, for clustering + map)
+//   pairs:   [{ a, b, sharedCommits }]             (deduped, for the receipt / co-change list)
+// Commits touching more than `maxFiles` source files are dropped — mega-refactors and
+// "format everything" commits create false co-change links and are the main noise source.
+function buildCoChangePeers(parsedFiles, root, maxFiles = 15) {
+  const empty = { peerMap: new Map(), pairs: [] };
   let commits = [];
+  const known = new Set(parsedFiles.map(f => f.path));
   try {
     const out = execSync('git log --name-only --pretty=format:"" -n 300', {
       cwd: root, stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000,
@@ -1916,40 +3028,40 @@ function buildCoChangePeers(parsedFiles, root) {
     // Each commit block is separated by blank lines
     const blocks = out.split(/\n\n+/);
     for (const block of blocks) {
-      const files = block.split('\n').map(l => l.trim().replace(/^"/, '')).filter(l => l.length > 0 && SOURCE_EXTENSIONS.test(l));
-      if (files.length >= 2) commits.push(files);
+      const files = block.split('\n')
+        .map(l => l.trim().replace(/^"|"$/g, ''))
+        .filter(l => l.length > 0 && SOURCE_EXTENSIONS.test(l) && known.has(l));
+      // Drop sprawling commits — they imply nothing about which files truly belong together.
+      if (files.length >= 2 && files.length <= maxFiles) commits.push(files);
     }
-  } catch { return new Map(); }
+  } catch { return empty; }
 
-  if (commits.length === 0) return new Map();
+  if (commits.length === 0) return empty;
 
   const coChangeCounts = new Map();
   for (const files of commits) {
-    for (let i = 0; i < files.length; i++) {
-      for (let j = i + 1; j < files.length; j++) {
-        const key = [files[i], files[j]].sort().join('|');
+    const uniq = [...new Set(files)];
+    for (let i = 0; i < uniq.length; i++) {
+      for (let j = i + 1; j < uniq.length; j++) {
+        const key = [uniq[i], uniq[j]].sort().join('|');
         coChangeCounts.set(key, (coChangeCounts.get(key) || 0) + 1);
       }
     }
   }
 
-  const fileFreq = new Map();
-  for (const files of commits) for (const f of files) fileFreq.set(f, (fileFreq.get(f) || 0) + 1);
-
-  const peerMap = new Map();
-  for (const f of parsedFiles) {
-    const peers = [];
-    for (const [key, count] of coChangeCounts) {
-      const [a, b] = key.split('|');
-      const partner = a === f.path ? b : (b === f.path ? a : null);
-      if (!partner) continue;
-      const freq = Math.min(fileFreq.get(a) || 1, fileFreq.get(b) || 1);
-      peers.push({ partner, score: count / freq });
-    }
-    peers.sort((a, b) => b.score - a.score);
-    peerMap.set(f.path, peers.slice(0, 3).map(p => p.partner));
+  const pairs = [];
+  const peerMap = new Map(parsedFiles.map(f => [f.path, []]));
+  for (const [key, count] of coChangeCounts) {
+    const [a, b] = key.split('|');
+    pairs.push({ a, b, sharedCommits: count });
+    if (peerMap.has(a)) peerMap.get(a).push({ partner: b, sharedCommits: count });
+    if (peerMap.has(b)) peerMap.get(b).push({ partner: a, sharedCommits: count });
   }
-  return peerMap;
+  for (const peers of peerMap.values()) {
+    peers.sort((x, y) => y.sharedCommits - x.sharedCommits);
+  }
+  pairs.sort((x, y) => y.sharedCommits - x.sharedCommits);
+  return { peerMap, pairs };
 }
 
 function clusterByCoChange(flatFiles, coChangePeers) {
@@ -1959,7 +3071,7 @@ function clusterByCoChange(flatFiles, coChangePeers) {
 
   for (const f of flatFiles) {
     if (clusters.has(f.path)) continue;
-    const peers = coChangePeers.get(f.path) || [];
+    const peers = (coChangePeers.get(f.path) || []).map(p => p.partner);
     if (peers.length === 0) {
       clusters.set(f.path, `domain_${clusterIdx++}`);
       continue;
@@ -1981,39 +3093,196 @@ function clusterByCoChange(flatFiles, coChangePeers) {
 
 // ─── Centrality ───────────────────────────────────────────────────────────────
 
-function resolveImport(importer, importSource, allPaths) {
-  if (!importSource.startsWith('.')) return null;
-  const dir = path.dirname(importer);
-  const resolved = path.resolve(dir, importSource);
+// ─── TS / Alias Resolution ────────────────────────────────────────────────────
 
+// Reads tsconfig.json (or jsconfig.json as fallback) and extracts path alias
+// config: baseUrl (absolute) and paths map. Follows one level of local `extends`
+// so child config overrides parent — npm-package extends are skipped silently.
+function loadTsConfig(root, tsConfigPath) {
+  const NAMES = tsConfigPath
+    ? [tsConfigPath]
+    : ['tsconfig.json', 'jsconfig.json'];
+
+  const parseJsonc = (raw) =>
+    JSON.parse(
+      raw
+        .replace(/\/\/[^\n]*/g, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/,(\s*[}\]])/g, '$1')
+    );
+
+  const readOne = (filePath) => {
+    try {
+      return parseJsonc(fs.readFileSync(filePath, 'utf8'));
+    } catch { return null; }
+  };
+
+  for (const name of NAMES) {
+    const filePath = path.isAbsolute(name) ? name : path.join(root, name);
+    const tc = readOne(filePath);
+    if (!tc) continue;
+
+    // Merge parent config if `extends` is a local file (not an npm package)
+    let parentOpts = {};
+    const ext = tc.extends;
+    if (ext && (ext.startsWith('.') || ext.startsWith('/'))) {
+      const parentPath = path.resolve(path.dirname(filePath), ext.endsWith('.json') ? ext : ext + '.json');
+      const parent = readOne(parentPath);
+      if (parent && parent.compilerOptions) parentOpts = parent.compilerOptions;
+    }
+
+    const opts = { ...parentOpts, ...(tc.compilerOptions || {}) };
+    const baseUrl = opts.baseUrl ? path.resolve(path.dirname(filePath), opts.baseUrl) : null;
+    const paths = opts.paths || {};
+    return { baseUrl, paths };
+  }
+  return { baseUrl: null, paths: {} };
+}
+
+// Reads root package.json `workspaces` and returns a Map from package name to
+// { dir (absolute), main (relative entry) }. Handles both array and
+// { packages: [...] } forms. Expands simple `prefix/*` globs via readdirSync;
+// falls back to minimatch for complex patterns (minimatch is already a dep).
+function loadWorkspacePackages(root) {
+  const pkgPath = path.join(root, 'package.json');
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')); } catch { return new Map(); }
+
+  const workspacesRaw = pkg.workspaces;
+  if (!workspacesRaw) return new Map();
+
+  const patterns = Array.isArray(workspacesRaw) ? workspacesRaw : (workspacesRaw.packages || []);
+  const map = new Map();
+
+  const addPkgDir = (dir) => {
+    const subPkg = path.join(dir, 'package.json');
+    if (!fs.existsSync(subPkg)) return;
+    let sp;
+    try { sp = JSON.parse(fs.readFileSync(subPkg, 'utf8')); } catch { return; }
+    if (!sp.name) return;
+    // Resolve entry point: prefer module > main > index
+    const mainEntry = sp.exports?.['.']?.import || sp.exports?.['.']?.default
+      || sp.exports?.['.'] || sp.module || sp.main || 'index';
+    const mainStr = typeof mainEntry === 'string' ? mainEntry : 'index';
+    map.set(sp.name, { dir, main: mainStr.replace(/^\.\//, '') });
+  };
+
+  for (const pattern of patterns) {
+    if (!pattern.includes('*')) {
+      const dir = path.join(root, pattern);
+      if (fs.existsSync(dir)) addPkgDir(dir);
+      continue;
+    }
+    // Simple `prefix/*` glob — expand with readdirSync
+    const parts = pattern.split('/');
+    const starIdx = parts.indexOf('*');
+    if (starIdx !== -1) {
+      const prefix = path.join(root, ...parts.slice(0, starIdx));
+      try {
+        for (const entry of fs.readdirSync(prefix, { withFileTypes: true })) {
+          if (entry.isDirectory()) addPkgDir(path.join(prefix, entry.name));
+        }
+      } catch {}
+    }
+  }
+  return map;
+}
+
+// Shared extension-probing logic for both relative and alias resolution.
+// Tries: exact → strip-JS-ext+TS-ext → append-exts → /index.*
+function probeExtensions(resolved, allPaths) {
   if (allPaths.has(resolved)) return resolved;
+
+  const jsExt = resolved.match(/\.(js|jsx|mjs|cjs)$/);
+  if (jsExt) {
+    const base = resolved.slice(0, -jsExt[0].length);
+    for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs']) {
+      if (allPaths.has(base + ext)) return base + ext;
+    }
+  }
   for (const ext of ['.ts', '.tsx', '.js', '.jsx', '.py', '.go', '.rs', '.rb']) {
-    const candidate = resolved + ext;
-    if (allPaths.has(candidate)) return candidate;
+    if (allPaths.has(resolved + ext)) return resolved + ext;
   }
   for (const ext of ['.ts', '.tsx', '.js', '.jsx']) {
-    const candidate = path.join(resolved, 'index') + ext;
-    if (allPaths.has(candidate)) return candidate;
+    if (allPaths.has(path.join(resolved, 'index') + ext)) return path.join(resolved, 'index') + ext;
   }
   return null;
 }
 
-function computeCentrality(parsedFiles) {
+// Resolves a non-relative import (alias or workspace package) to an absolute
+// path in allPaths. Returns null for genuine external npm packages.
+function resolveAlias(importSource, allPaths, { baseUrl, paths, workspacePackages }) {
+  // 1. tsconfig `paths` patterns — e.g. "@/*" → ["./src/*"]
+  for (const [pattern, targets] of Object.entries(paths || {})) {
+    // Escape regex special chars except `*`, then replace `*` with a capture group
+    const re = new RegExp('^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '(.*)') + '$');
+    const m = importSource.match(re);
+    if (!m) continue;
+    for (const target of (Array.isArray(targets) ? targets : [targets])) {
+      const expanded = target.replace(/\*/g, m[1]);
+      const base = baseUrl
+        ? path.resolve(baseUrl, expanded)
+        : path.resolve(expanded);
+      const hit = probeExtensions(base, allPaths);
+      if (hit) return hit;
+    }
+  }
+
+  // 2. baseUrl bare resolution — `import 'utils/format'` when baseUrl is set
+  if (baseUrl) {
+    const base = path.resolve(baseUrl, importSource);
+    const hit = probeExtensions(base, allPaths);
+    if (hit) return hit;
+  }
+
+  // 3. Workspace package names — `import '@myorg/shared'` or `'@myorg/shared/utils'`
+  if (workspacePackages) {
+    for (const [pkgName, { dir, main }] of workspacePackages) {
+      if (importSource === pkgName) {
+        const hit = probeExtensions(path.resolve(dir, main), allPaths)
+          || probeExtensions(path.join(dir, 'index'), allPaths);
+        if (hit) return hit;
+      } else if (importSource.startsWith(pkgName + '/')) {
+        const sub = importSource.slice(pkgName.length + 1);
+        const hit = probeExtensions(path.resolve(dir, sub), allPaths);
+        if (hit) return hit;
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveImport(importer, importSource, allPaths, aliases = {}) {
+  if (!importSource.startsWith('.')) {
+    // Try alias/workspace resolution before giving up on non-relative imports
+    return resolveAlias(importSource, allPaths, aliases);
+  }
+  const dir = path.dirname(importer);
+  return probeExtensions(path.resolve(dir, importSource), allPaths);
+}
+
+function computeCentrality(parsedFiles, aliases = {}) {
   const allPaths = new Set(parsedFiles.map(f => f.fullPath));
   const inDegree  = new Map(parsedFiles.map(f => [f.fullPath, 0]));
   const outDegree = new Map(parsedFiles.map(f => [f.fullPath, 0]));
+  // Resolved edges keyed by fullPath: imports = forward, importedBy = reverse.
+  const imports     = new Map(parsedFiles.map(f => [f.fullPath, []]));
+  const importedBy  = new Map(parsedFiles.map(f => [f.fullPath, []]));
 
   for (const f of parsedFiles) {
     const visited = new Set();
     for (const imp of f.imports) {
-      const resolved = resolveImport(f.fullPath, imp, allPaths);
+      const resolved = resolveImport(f.fullPath, imp, allPaths, aliases);
       if (!resolved || visited.has(resolved)) continue;
       visited.add(resolved);
       outDegree.set(f.fullPath, (outDegree.get(f.fullPath) ?? 0) + 1);
       inDegree.set(resolved, (inDegree.get(resolved) ?? 0) + 1);
+      imports.get(f.fullPath).push(resolved);
+      importedBy.get(resolved).push(f.fullPath);
     }
   }
-  return { inDegree, outDegree };
+  return { inDegree, outDegree, imports, importedBy };
 }
 
 // ─── Domain Inference ─────────────────────────────────────────────────────────
@@ -2078,12 +3347,7 @@ function buildVocabulary(domainFiles, allDomainFilesMap) {
   };
 
   for (const f of domainFiles) {
-    // Signal 1: package domain signals (highest weight — multiply by 5)
-    for (const sig of (f.packageSignals || [])) {
-      for (let i = 0; i < 5; i++) domainTermFreq.set(sig, (domainTermFreq.get(sig) || 0) + 1);
-    }
-
-    // Signal 2: all identifiers
+    // Signal 1: all identifiers
     addTerms(f.allIdentifiers || []);
 
     // Signal 3: string literals (tokenized)
@@ -2105,7 +3369,6 @@ function buildVocabulary(domainFiles, allDomainFilesMap) {
       const domainTerms = new Set();
       for (const f of dFiles) {
         for (const t of [
-          ...(f.packageSignals || []),
           ...(f.allIdentifiers || []),
           ...(f.commentTerms || []),
           ...tokenize(f.path),
@@ -2166,9 +3429,9 @@ function mergeConfig(userConfig) {
     forcePivots: userConfig.forcePivots ?? [],
     exclude: userConfig.exclude ?? [],
     domains: userConfig.domains ?? null,
-    tokenBudget: userConfig.tokenBudget ?? 2000,
-    barrelsAsSkeletons: userConfig.barrelsAsSkeletons ?? true,
+    coChangeMaxFiles: userConfig.coChangeMaxFiles ?? 15,
     configDownweight: userConfig.configDownweight ?? true,
+    tsConfigPath: userConfig.tsConfigPath ?? null,
   };
 }
 
@@ -2194,6 +3457,38 @@ function walkDir(dir, root, config, results = []) {
     }
   }
   return results;
+}
+
+// Directory + stem key for a path, e.g. src/charge.ts → "src/charge". Used to
+// pair a source file with its colocated test by location, not just name.
+function stemKey(relative) {
+  const dir = path.dirname(relative);
+  const base = path.basename(relative).replace(SOURCE_EXTENSIONS, '');
+  return dir === '.' ? base : `${dir}/${base}`;
+}
+
+// Walks the tree for colocated test files (foo.test.ts, foo.spec.js, …) and maps
+// each back to the stem key of the source file it tests. These are NOT added to
+// the graph — they exist only so `check` can flag "you changed X but not its test".
+function findColocatedTests(root, config, dir = root, map = new Map()) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+  catch { return map; }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+      findColocatedTests(root, config, fullPath, map);
+    } else if (entry.isFile() && TEST_FILE_RE.test(entry.name)) {
+      const relative = path.relative(root, fullPath);
+      if (isExcluded(relative, config.exclude)) continue;
+      // foo.test.ts → stem key src/foo
+      const base = path.basename(relative).replace(/\.(test|spec|stories)\.(js|jsx|ts|tsx|py|go|rs|rb)$/, '');
+      const d = path.dirname(relative);
+      map.set(d === '.' ? base : `${d}/${base}`, relative);
+    }
+  }
+  return map;
 }
 
 function isExcluded(relative, patterns) {
@@ -2229,14 +3524,14 @@ module.exports = {
   main,
   runInit,
   runDiff,
-  runBrief,
+  runMap,
+  runCheck,
+  findSeeds,
+  expandNeighborhood,
   runStatus,
   runWhy,
   tokenize,
   parseFile,
-  scoreFile,
-  selectFiles,
-  detectChain,
   computeCentrality,
   inferDomain,
   buildVocabulary,
@@ -2254,8 +3549,36 @@ module.exports = {
   detectProjectType,
   isBarrelFile,
   isConfigFile,
-  getPackageSignals,
   buildCoChangePeers,
+  collectCallerWarnings,
+  coChangeLabel,
+  runImpact,
+  runOverview,
+  runTrace,
+  transitiveDependents,
+  detectCycles,
+  findColocatedTests,
+  stemKey,
+  loadObserved,
+  observedPeersMap,
+  recordObserved,
+  recordLedger,
+  runReceipts,
+  confirmCallerBreaks,
+  extractCallArgs,
+  arityOf,
+  detectRegressionPatterns,
+  runManifest,
+  runHistory,
+  runPreflight,
+  runImpactReport,
+  runOverviewDebt,
+  runMigrate,
+  detectSignificantEvent,
+  loadTsConfig,
+  loadWorkspacePackages,
+  probeExtensions,
+  resolveAlias,
 };
 
 if (require.main === module) main();

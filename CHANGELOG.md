@@ -1,5 +1,99 @@
 # Changelog
 
+## [2.4.0] — 2026-06-30
+
+**Fix the import graph for the repos that matter most.** TypeScript path aliases (`@/`, `~/`, `#lib/`), `jsconfig.json` `baseUrl`, and monorepo workspace cross-package imports now resolve to real files. Plus: seamless institutional memory capture — LLM-driven rule seeding on first init, architectural signal detection in `check`, and zero-arg `migrate` that auto-discovers CLAUDE.md, README, and convention files.
+
+### Added
+- **TypeScript path alias resolution** — `resolveImport` previously returned `null` for any import not starting with `.`, silently breaking the graph for every Next.js, Vite-TS, and CRA project. Now `loadTsConfig` reads `tsconfig.json` (or `jsconfig.json`), strips JSONC comments and trailing commas, follows one level of local `extends`, and extracts `baseUrl` + `paths`. Aliases like `@/*` → `src/*` resolve to the actual source file through shared `probeExtensions` logic. The `init` output now shows `aliases: N path aliases · M workspace pkgs` when detected.
+- **Monorepo workspace cross-package imports** — `loadWorkspacePackages` reads root `package.json` `workspaces` (array or `{ packages: [] }` form), expands `packages/*`/`apps/*`/`libs/*` globs, and reads each member's `package.json` for `name` + entry point. `import '@myorg/shared'` and sub-path imports (`@myorg/shared/utils/helpers`) now resolve to the actual source file.
+- **`tsConfigPath` config option** — users can set `tsConfigPath: 'tsconfig.app.json'` in `vectora.config.js` to point to a non-standard tsconfig (Angular, multi-config setups).
+- **LLM-driven rule seeding on first init** — when `init` builds the graph for the first time, it appends a `[VECTORA SEED]` block instructing the agent to run `overview` + `why` on pivot files, synthesize 3–7 architectural rules using LLM judgment, and propose each to the user. This is where LLM reasoning adds value that zero-token init cannot provide.
+- **`[ARCHITECTURAL SIGNAL]` in `check`** — `detectSignificantEvent` fires when ≥2 new source files were created or ≥4 structural peers (co-change + caller) were flagged, signaling that the task likely established an architectural pattern worth capturing with `/vectora learn`.
+- **`vectora migrate`** — auto-discovers `CLAUDE.md`, `README.md`, `.cursorrules`, `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, and any `RULES.md`/`DECISIONS.md`/`CONVENTIONS.md` in the repo (no filepath arg needed). Outputs a structured `[VECTORA MIGRATE]` block with file contents, lists existing `decisions.json` rules as a dedup skip-list, and instructs the agent to extract and propose architectural rules for user confirmation.
+
+### Changed
+- `resolveImport` refactored: extension-probing logic extracted to shared `probeExtensions(absBase, allPaths)`; non-relative imports now route through `resolveAlias` before returning null.
+- `computeCentrality` accepts `aliases` param forwarded from `runInit`/`runDiff`.
+- `runInit` and `runDiff` both load tsconfig + workspace aliases before computing centrality.
+- `skill/SKILL.src.md` updated: `## After first init` seeding protocol, enhanced `## Background capture` with conversational/semantic triggers, new `## /vectora migrate` section.
+
+## [2.3.0] — 2026-06-30
+
+**Provenance, institutional memory, and coupling visibility.** Six new capabilities that give agents and developers what no amount of context-window size can compute: cross-session pattern memory, causal PR receipts, co-located danger constraints, coupling debt metrics, and a shareable monthly impact summary.
+
+### Added
+- **`@vectora danger:` annotations** — co-locate critical constraints with the code they guard (`// @vectora danger: mobile app dependency — no breaking changes`). At `map` time, vectora surfaces all danger annotations on files in the task scope before anything else. Works in JS/TS (`//`), Python (`#`), Go (`//`), Rust (`//`), and Ruby (`#`). Stored in `graph.json` per file.
+- **`vectora preflight`** — pre-session situational awareness: graph staleness, open co-change misses from the last session, danger zone inventory, global rule count, cycle presence. Run this before any large or risky session — surfaces unresolved business from the previous session that agents start cold and cannot know about.
+- **`vectora manifest`** — causal PR receipt generated offline from the graph + ledger + git diff. Categorizes every changed file as: directly targeted, changed because of structural coupling (confirmed break or co-change), or flagged-but-not-edited. Paste into the PR description to explain *why* each file changed, not just *what* changed.
+- **`vectora history <file>`** — cross-session coupling memory: how many times this file changed in the last 30 days, which files were co-edited in each session, and which co-change partners were flagged but never resolved. If a partner appears flagged 3+ times without being edited, `history` proposes a `/vectora learn` rule to bake it in permanently.
+- **`vectora impact-report`** — 30-day aggregate summary: confirmed breaks caught, co-change links used vs. missed, callers warned, stale tests flagged, highest-risk file, coupling debt trend. Designed to be pasted into retrospectives or shared with teammates.
+- **`vectora overview --debt`** — coupling debt scores for all tracked file pairs: `(coChangeCount × 3) + (sharedImports × 2) − (testCoverageLinks × 5)`. Surfaces the highest-debt pairs with no test safety net — the ones most likely to produce silent bugs.
+- **Regression pattern detection in `check`** — after `check` completes, `detectRegressionPatterns` scans the 30-day ledger. If a co-change pair has been flagged 3+ times without being co-edited, `check` surfaces a `learn` proposal so the pattern becomes a persistent rule.
+
+### Changed
+- `check` now reads `lastMapTask` from `last-map.json` and surfaces danger annotations on files actually edited (not only map-scope files).
+- `runCheck` passes `task` + `editedFiles` to `recordLedger`, so the history is task-attributed and queryable by file.
+
+## [2.2.0] — 2026-06-30
+
+**The completeness guardrail.** `check` graduates from a nag to a real bug-catcher: confirmed arity breaks are now proven inconsistencies, not guesses; the co-change guardrail fires even without a prior `map`; and an honest lifetime ledger accumulates every incomplete edit flagged. `map` is sharpened to lead with co-change (the only signal the agent can't compute itself).
+
+### Added
+- **Confirmed arity breaks in `check`** — `✗ BROKEN: billing.js calls parseConfig() with 2 args but it now requires 3.` On every `check`, vectora re-parses the live source of edited JS/TS files *and* their importers from disk and proves the inconsistency from AST call-site argument counts vs. the current function signature. These are not guesses — they are structural inconsistencies that will fail at runtime. Fix every `✗` line before declaring a task done. Python/Go/Rust remain at `⚠ verify?` (planned for 2.3).
+- **`check` decoupled from `map`** — Previously, co-change misses were only emitted when `map` had run beforehand (its co-change list was stored in `last-map.json`). Now `check` computes misses directly from the graph and session ledger for every edited file, so the guardrail fires reliably regardless of whether `map` was used. Map-derived pairs and graph-derived pairs are merged and deduplicated.
+- **`exportSignatures` captured at init** — `parseBabel` now stores `{ required, max, hasRest }` for every exported function/arrow/method. Used at `check` time to confirm arity breaks; zero cost when `check` finds no callers.
+- **Honest ledger + `vectora receipts`** — Every non-zero `check` run appends an event to `.vectora/ledger.json` (per-developer, not committed). `vectora receipts` shows lifetime totals: total incomplete edits flagged, confirmed breaks, co-change misses, caller warnings, stale tests, recent task history. Wording is always "flagged" — never "saved." `vectora status` now includes a one-line receipts summary.
+
+### Changed
+- `map` output reordered: **CO-CHANGE leads** (the signal the agent cannot compute itself), followed by a compact START HERE and a capped NEIGHBORHOOD (max 6 lines, with overflow note). No behavior change to seed matching.
+- `check` receipt now groups: `✗ BROKEN` first (must fix), then co-change misses, then caller warnings (deduped against confirmed-break importers), then stale tests.
+- `buildClaudeCommand` updated to teach the agent the `✗`/`⚠` distinction and the `receipts` command.
+
+## [2.1.0] — 2026-06-30
+
+**Useful from commit #1 — no git history required.** v2.0's "you forgot this file" magic came entirely from git co-change, so it went silent on new or shallow repos. 2.1 adds static, history-free coupling signals so vectora earns its keep on day one.
+
+### Added
+- **Caller / consumer recall in `check`** — flags files that import what you changed *and* reference one of its exported symbols, but that you didn't touch (`⚠ retry.ts imports errors.ts (uses RetryError) but wasn't edited — verify?`). Pure static graph; no git history needed. (Signature-aware escalation is the next phase.)
+- **Test-pairing in `check`** — `⚠ charge.ts changed but charge.test.ts wasn't — update the test?`. Colocated tests are indexed for pairing but kept out of the centrality graph, so pivots are unaffected.
+- **Session-observed coupling ledger** (`.vectora/observed.json`) — `check` remembers the files you edit together; `map` surfaces that coupling on future tasks. Merges with git co-change (each link shows provenance: `git 5× · sessions 2×`) and stands in for it entirely on a repo with no history.
+- **`vectora impact <file|symbol>`** — "what breaks if I change this?": direct + transitive dependents for a file, or the consumers of an exported symbol.
+- **`vectora overview`** — architecture summary (most-depended-on files, domains, entry points, orphans, circular imports). The best first action on an unfamiliar or brand-new repo.
+- **`vectora trace <symbol>`** — where a symbol is defined, who calls it, what its file depends on.
+- **Blast-radius surfacing** — `map` warns when a seed's changes ripple to many files; `why` now leads with the blast radius.
+
+### Changed
+- `check` now detects untracked/new files (via `git status --porcelain`), not just tracked diffs — so it works on a freshly created file.
+- `why` uses the precise resolved reverse-dependency graph instead of a name-matching heuristic.
+- Skill rewritten to describe the three `check` signals and the new commands.
+
+## [2.0.0] — 2026-06-30
+
+**The Router → Cartographer rebuild.** vectora no longer decides which files your agent loads — it gives the agent the structural map it can't compute (import graph + git co-change history) and proves its worth with an honest post-task receipt.
+
+### Why
+v1.x "skeletonized" files and reported invented "tokens saved" numbers. Measured on a real task (`sindresorhus/got`), it cost ~3× more tokens than the baseline and buried the actual edit targets in its skeleton bucket. The headline savings figure was not real.
+
+### Added
+- `vectora map "<task>"` — emits a `[VECTORA MAP]` block: keyword-matched **seeds** (each with the reason it matched), the graph **neighborhood** (forward imports, reverse importers, centrality), and **co-change** pairs from git history. Nothing is hidden or skeletonized; the agent navigates by its own judgment.
+- `vectora check` — the honest receipt. Compares `git diff` against the co-change links vectora surfaced; reports the links you used (`✓`) and flags predicted-but-unedited peers (`⚠ worth a look?`). This is the value-proof, verifiable on your own repo.
+- `coChangeMaxFiles` config (default 15) — commits touching more than N source files are ignored, so "reformat everything" commits don't create false co-change links.
+- TS ESM import resolution: `import './x.js'` now correctly resolves to `x.ts`/`x.tsx`.
+- Tests for `findSeeds`, `expandNeighborhood`, `resolveImport`, and `runCheck` (end-to-end co-change recall on a real git fixture).
+
+### Changed
+- `vectora init` is now single-pass, fully offline, and **costs zero tokens** — no in-session LLM enrichment.
+- Skill rewritten for the map → navigate → check loop across all 7 agents.
+- README rewritten around the cartographer pitch and the receipt.
+
+### Removed
+- The `PACKAGE_DOMAIN_SIGNALS` table, `SKELETON_VERB_MAP`, `isFrameworkForcedPivot`, and all hardcoded rule tables.
+- The Phase-B LLM enrichment in `init` (`enrich`, `init --step`, `--get-pivots`).
+- The static `scoreFile`/`selectFiles` scorer and skeleton bucketing.
+- `vectora brief` (replaced by `map`; the old name still dispatches to `map` for compatibility).
+- Every "tokens saved" claim.
+
 ## [1.3.3] — 2026-06-29
 
 ### Added
