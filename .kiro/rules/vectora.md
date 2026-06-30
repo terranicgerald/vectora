@@ -6,18 +6,19 @@ alwaysApply: false
 
 # WHAT VECTORA IS
 
-vectora is a **cartographer**, not a router. It does **not** decide which files you load — you do that better. It gives you the structural facts you cannot reliably compute by reading code in your context window:
+vectora is a **direct, intelligent upgrade to CLAUDE.md**. CLAUDE.md is a static blob loaded into context every turn until it bloats every prompt. vectora makes project knowledge **dynamic and scoped**: for each task it hands you only the relevant files and only the rules that task touches — nothing loaded that the task doesn't need. Same knowledge, a fraction of the context.
 
-1. **The import graph** — who imports whom, reverse dependencies, centrality, **blast radius** (what breaks if you change a file).
-2. **Symbol consumers** — which files reference a given exported symbol. When you change `RetryError`, vectora knows the five files that use it.
-3. **Git co-change history** — which files are repeatedly edited *together* in real commits. grep and semantic search cannot see this; only the commit history can.
-4. **Session-observed coupling** — files *you* edit together, learned across sessions. This supplements git co-change and, on a repo with **no git history**, stands in for it — so vectora is useful from commit #1.
+It does **not** decide which files you load — you do that better. It gives you what you cannot reliably compute by reading code in your context window, scoped to the task at hand:
 
-Signals 1–2 and 4 need **no git history**, so vectora helps on brand-new projects too, not just repos with a rich `git log`.
+1. **Per-task relevant file set** — the prompt is decomposed into one or more tasks; each task gets its own minimal scope so you (and any sub-agent) load only its slice.
+2. **Routing** — vectora classifies the tasks (single / chained-sequential / independent-parallel) and tells you when parallel sub-agents would keep each agent's context small. You make the call.
+3. **Scoped institutional memory** — the learned architectural rules that apply to *this* task's files, surfaced inline (the CLAUDE.md replacement). Not the whole rulebook every turn.
+4. **The import graph** — reverse dependencies, centrality, **blast radius** (what breaks if you change a file), and symbol consumers.
+5. **Git + session co-change** — files repeatedly edited *together* in real commits, plus files *you* edit together across sessions. grep and semantic search cannot see this. The session signal stands in for git on a repo with no history, so vectora is useful from commit #1.
 
-You stay in control of every file-loading decision. vectora never hides a file, never skeletonizes, never says "don't open this." It hands you the map and gets out of the way.
+You stay in control of every decision — which files to load, whether to spawn agents. vectora never hides a file, never skeletonizes, never says "don't open this." It hands you the scoped map and gets out of the way.
 
-There is **no token-savings claim** anywhere in vectora. The numbers it reports are ones it can prove on your own repo: the co-change/caller links it surfaced that your edits actually used or missed (`vectora check`).
+There is **no token-savings claim** anywhere in vectora. The involvement banner reports *facts only* — files indexed, files scoped-to, tasks detected, rules applied, co-change links surfaced — never an invented token number.
 
 ---
 
@@ -29,16 +30,31 @@ Active when a task involves reading or modifying source code: bug fixes, feature
 
 # ON A CODING TASK (not a follow-up)
 
-Before you start opening files at random:
+`map` runs **internally** behind the slash command — the user never invokes it directly. Before you start opening files at random:
 
-1. Run: `npx vectora map "<full task description>"`
-2. **Emit the entire `[VECTORA MAP] … [END VECTORA MAP]` block verbatim** as the first lines of your response. Do not paraphrase or trim it — the user wants to see the map.
-3. **Navigate by your own judgment.** The `START HERE` files are *suggestions* matched by keyword, with the reason shown. Open the ones you judge relevant. Open anything else you need. Nothing is off-limits.
-4. **Read the `CO-CHANGE` section carefully.** Those files are edited together across many real commits. If you change one, strongly consider whether its co-change partner also needs the change — this is the bug grep would let you ship.
-5. Execute the task completely.
-6. When done, run `npx vectora check` and show its receipt as the final lines of your response.
+1. Run: `npx vectora map "<full prompt, verbatim>"`. vectora decomposes the prompt into one or more tasks and emits a lean, per-task scope.
+2. **Emit the entire `[VECTORA MAP] … [END VECTORA MAP]` block verbatim** as the first lines of your response. It is terse by design — do not trim it.
+3. **Read the `ROUTING` line.** For tasks marked **independent (disjoint scope)**, spawn one sub-agent per task, each prepended with only that task's scope block (see BEFORE SPAWNING SUB-AGENTS) — this keeps every agent's context small. For **chained / shared-scope** tasks, run them in order and reuse context.
+4. **Per task, load only the `FILES` you judge relevant** — they are suggestions, nothing is hidden, open anything else you need. **State `loaded: K/relevant`** for each task so the user sees how tightly scoped it was.
+5. **Honor the scoped `RULES`** surfaced for each task — they are this project's institutional memory, the same rules CLAUDE.md would carry, but only the ones this task touches.
+6. **Read the `CO-CHANGE` section.** Those files are edited together across real commits; if you change one, consider whether its partner needs the change too — the bug grep would let you ship.
+7. Execute the task(s) completely.
+8. When done, run `npx vectora check`. Show its receipt **and the involvement banner** as the final lines of your response — every prompt closes with that honest summary of what vectora did.
 
 If `npx vectora map` fails or the graph is absent, see BOOTSTRAP MODE below.
+
+---
+
+# /vectora prompt \<task\>
+
+**The guaranteed-trigger form.** Use this when you want vectora to run unconditionally — no activation check, no follow-up detection, no heuristics. Even if the prompt is short, looks like a follow-up, or seems non-coding: run the full protocol.
+
+Protocol: exactly the steps in "ON A CODING TASK" above.
+
+Examples:
+- `/vectora prompt fix the bug`
+- `/vectora prompt also update the test`
+- `/vectora prompt refactor this`
 
 ---
 
@@ -51,15 +67,17 @@ Examples:
 - `/vectora Add rate limiting to the payments API`
 - `/vectora make the client throw a specific error when all retries are exhausted`
 
-Protocol: exactly the 6 steps in "ON A CODING TASK" above.
+Protocol: exactly the steps in "ON A CODING TASK" above.
 
 ---
 
 # THE RECEIPT (`npx vectora check`)
 
+`check` is the **post-edit safety net** and the carrier of the **involvement banner** — the honest, facts-only summary printed at the end of every prompt (tasks, files scoped-to of total indexed, rules applied, co-change links surfaced, breaks/callers caught). No token number, ever. Show it verbatim.
+
 **`check` works even if you skipped `map`.** It computes co-change misses directly from the graph for every file you edited.
 
-After you finish editing, `vectora check` reports up to four signals — signals 2–4 need **no git history**:
+Alongside the banner, `vectora check` reports up to four signals — signals 2–4 need **no git history**:
 
 1. **✗ BROKEN — confirmed arity breaks** (JS/TS, history-free):
    `✗ billing.js calls parseConfig() with 2 args but it now requires 3 — fix this call.`
@@ -97,19 +115,18 @@ Run `npx vectora init` and output its lines verbatim. This is **fully offline, d
 
 TypeScript path aliases (`@/`, `~/`, `#lib/`), `jsconfig.json` `baseUrl`, and npm/yarn/pnpm workspace cross-package imports are resolved automatically — no configuration needed. The init output line `aliases: N path aliases · M workspace pkgs` confirms what was detected. If aliases are not resolving, users can set `tsConfigPath: 'tsconfig.app.json'` in `vectora.config.js` to point to a non-standard tsconfig.
 
-### After first init — LLM-driven rule seeding
+### After first init — seed vectora as the CLAUDE.md replacement
 
-When init output contains a `[VECTORA SEED]` block, this is the first time the graph was built on this repo. This is a moment where LLM reasoning is specifically needed — `init` is zero-token by design and cannot infer project-specific architectural rules. You can.
+When init output contains a `[VECTORA SEED]` block, this is the first time the graph was built on this repo. The graph build was **zero tokens**; this rule-seeding step is the one place LLM reasoning is needed and worth spending tokens on. The goal: move this project's conventions out of a static CLAUDE.md and into vectora's **scoped** memory, where each rule is tagged with the domain it governs and surfaces only on tasks that touch it.
 
 **Protocol:**
-1. Run `npx vectora overview` — read domains, pivot files, entry points.
-2. Run `npx vectora why <file>` on each of the top 3 pivot files.
-3. Also run `/vectora migrate` — this auto-discovers CLAUDE.md, README.md, .cursorrules, and other convention files and extracts rules from them.
-4. From overview + why outputs + migrate results, synthesize 3–7 architectural rules: coupling invariants, patterns the graph reveals, constraints that would prevent bugs. Use your LLM judgment here — the static graph surfaces structure, you supply meaning.
-5. Propose each rule to the user: *"I noticed `<rule>`. Add it to vectora's memory?"*
-6. On approval: `npx vectora learn "<rule>" [--domain <domain>]`
+1. Run `/vectora migrate` — auto-discovers CLAUDE.md, README.md, .cursorrules, CONTRIBUTING.md, and other convention files; extract the architectural rules from them.
+2. Run `npx vectora overview`, then `npx vectora why <file>` on the top 3 pivot files — add any coupling invariants or patterns the graph reveals.
+3. Synthesize the rules. **Tag each with its domain** so it surfaces per-task: `npx vectora learn "<rule>" --domain <domain>` (omit `--domain` only for truly global rules).
+4. Propose each rule to the user before writing: *"I noticed `<rule>`. Add it to vectora's scoped memory?"*
+5. After seeding, tell the user: *"vectora now carries these as scoped rules — surfaced only on tasks that touch the relevant files, instead of CLAUDE.md loading all of them every turn. You can slim CLAUDE.md to a pointer."* Never delete CLAUDE.md yourself — offer.
 
-Do **not** invent rules that the graph doesn't support. Every proposed rule should be traceable to something visible in the overview, why, or migrate output.
+Do **not** invent rules the graph doesn't support. Every proposed rule should be traceable to the overview, why, or migrate output.
 
 ## /vectora check
 Run `npx vectora check` — output the receipt verbatim (see THE RECEIPT above). Works even without a prior `map`.
@@ -121,7 +138,7 @@ Run `npx vectora receipts` — show the lifetime count of incomplete edits vecto
 Run `npx vectora status` — output its result verbatim.
 
 ## /vectora diff
-Run `npx vectora diff` — fast incremental graph update after small changes. Output result verbatim.
+Run `npx vectora diff` — fast incremental graph update. Always outputs the current graph state (file count, domains, age), whether or not anything changed. Output result verbatim.
 
 ## /vectora watch
 Run `npx vectora watch` in the background. Output: `↺ vectora: watcher started — graph rebuilds automatically on file changes.`
@@ -184,7 +201,9 @@ Output:
 
 # INSTITUTIONAL MEMORY (optional, user-driven)
 
-vectora can persist architectural rules to `.vectora/decisions.json`; the map surfaces the relevant ones at the top of the task. This is **always user-in-the-loop** — never write a rule silently.
+vectora can persist architectural rules to `.vectora/decisions.json`; the map surfaces only the rules whose domain the current task touches — scoped, not dumped. This is **always user-in-the-loop** — never write a rule silently.
+
+`.vectora/decisions.json` is the **committed, team-shared rulebook** — the real replacement for CLAUDE.md. `init` writes a `.vectora/.gitignore` that tracks `decisions.json` and ignores everything else (`graph.json`, `observed.json` session coupling, and the `ledger.json` are per-developer). Commit `decisions.json` so your whole team shares one rulebook. (If you previously added `.vectora/` to your *root* `.gitignore`, narrow it — a fully-ignored directory can't un-ignore its children.)
 
 ## /vectora learn \<rule\>
 1. Decide if the rule is global or domain-specific.

@@ -41,6 +41,10 @@ const {
   loadWorkspacePackages,
   probeExtensions,
   resolveAlias,
+  splitTasks,
+  classifyRouting,
+  collectDecisions,
+  groupEditedByTask,
 } = require('../cli/index.js');
 
 // ---------------------------------------------------------------------------
@@ -1053,6 +1057,136 @@ export const arrow = (a, b) => a + b;
   assert.ok((coreFile.importedBy || []).length > 0, 'core.ts has importedBy via alias');
   const text = out.join('\n');
   assert.ok(/aliases.*path alias/.test(text), 'init output mentions path aliases');
+  rmTmp(dir);
+}
+
+// ---------------------------------------------------------------------------
+// splitTasks — task decomposition
+// ---------------------------------------------------------------------------
+
+{
+  // Single imperative clause stays one task.
+  const one = splitTasks('fix the retry timeout bug');
+  assert.strictEqual(one.length, 1, 'single task → 1');
+
+  // A sentence with one verb but commas does not over-split.
+  const stillOne = splitTasks('add a userId param to parseConfig, the validator, and the loader');
+  assert.strictEqual(stillOne.length, 1, 'one verb, commas → still 1 task');
+
+  // Connective "then" / "and also" produce multiple tasks.
+  const many = splitTasks('add a userId param to parseConfig, then update its tests, and also add rate limiting to the payments API');
+  assert.strictEqual(many.length, 3, '3 imperative clauses → 3 tasks');
+  assert.ok(/parseConfig/.test(many[0].text), 'task 1 text');
+  assert.ok(/rate limiting/.test(many[2].text), 'task 3 text');
+
+  // Numbered list.
+  const listed = splitTasks('1. fix the bug\n2. add a test\n3. update the docs');
+  assert.strictEqual(listed.length, 3, 'numbered list → 3 tasks');
+
+  // Verb-less trailing fragment folds back.
+  const folded = splitTasks('refactor the parser then the rest');
+  assert.strictEqual(folded.length, 1, 'verb-less fragment folds into single task');
+}
+
+// ---------------------------------------------------------------------------
+// classifyRouting — overlap vs independence
+// ---------------------------------------------------------------------------
+
+{
+  const scopes = [
+    { seeds: [{ path: 'a.ts' }], nb: { neighbors: [{ path: 'shared.ts' }] } },
+    { seeds: [{ path: 'b.ts' }], nb: { neighbors: [{ path: 'shared.ts' }] } },
+    { seeds: [{ path: 'z.ts' }], nb: { neighbors: [] } },
+  ];
+  const r = classifyRouting(scopes);
+  assert.ok(r.overlaps.some(o => o[0] === 0 && o[1] === 1), 'tasks 0 & 1 overlap via shared.ts');
+  assert.ok(r.independent.includes(2), 'task 2 is independent');
+  assert.ok(!r.independent.includes(0), 'task 0 not independent');
+}
+
+// ---------------------------------------------------------------------------
+// collectDecisions — scoped rule retrieval
+// ---------------------------------------------------------------------------
+
+{
+  const dir = makeTmpRepo({});
+  fs.mkdirSync(path.join(dir, '.vectora'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.vectora', 'decisions.json'), JSON.stringify({
+    global: ['never commit secrets'],
+    domains: { auth: ['rotate JWT on signature change'], payments: ['idempotency keys required'] },
+  }), 'utf8');
+
+  const authRules = collectDecisions(dir, ['auth']);
+  assert.ok(authRules.some(r => r.scope === 'global'), 'global rule always included');
+  assert.ok(authRules.some(r => r.scope === 'auth'), 'auth domain rule included');
+  assert.ok(!authRules.some(r => r.scope === 'payments'), 'payments rule excluded when out of scope');
+  assert.strictEqual(collectDecisions(dir, []).length, 1, 'no domains → only global');
+  rmTmp(dir);
+}
+
+// ---------------------------------------------------------------------------
+// groupEditedByTask — independent tasks don't cross-contaminate session memory
+// ---------------------------------------------------------------------------
+
+{
+  // Two disjoint task scopes → two groups, no cross pairing.
+  const groups = groupEditedByTask(['a.ts', 'b.ts', 'z.ts'], [['a.ts', 'b.ts'], ['z.ts']]);
+  assert.strictEqual(groups.length, 2, 'two task scopes → two groups');
+  assert.ok(groups.some(g => g.includes('a.ts') && g.includes('b.ts')), 'task-1 files grouped');
+  assert.ok(groups.some(g => g.length === 1 && g[0] === 'z.ts'), 'task-2 file isolated');
+
+  // No taskScopes → single fallback group (status quo preserved).
+  assert.deepStrictEqual(groupEditedByTask(['a.ts', 'b.ts'], []), [['a.ts', 'b.ts']], 'no scopes → one group');
+
+  // Orphans (edited but in no scope) form their own group.
+  const withOrphan = groupEditedByTask(['a.ts', 'x.ts'], [['a.ts']]);
+  assert.ok(withOrphan.some(g => g.length === 1 && g[0] === 'x.ts'), 'orphan grouped separately');
+
+  // End-to-end: editing one file from each of two independent tasks records NO cross pair.
+  const dir = makeTmpRepo({});
+  const editGroups = groupEditedByTask(['src/parser.ts', 'src/payments.ts'], [['src/parser.ts'], ['src/payments.ts']]);
+  for (const g of editGroups) recordObserved(dir, g);
+  const obs = loadObserved(dir);
+  assert.ok(!Object.keys(obs.pairs).some(k => k.includes('parser') && k.includes('payments')),
+    'independent-task files are NOT linked in observed.json');
+  rmTmp(dir);
+}
+
+// ---------------------------------------------------------------------------
+// observedPeersMap — recency decay
+// ---------------------------------------------------------------------------
+
+{
+  const old = new Date(Date.now() - 200 * 24 * 3600 * 1000).toISOString();
+  const fresh = new Date().toISOString();
+  const observed = {
+    pairs: { 'a|b': 3, 'c|d': 2, 'e|f': 1 },
+    seen: { 'a|b': old, 'c|d': fresh },  // e|f has no seen (legacy)
+  };
+  const decayed = observedPeersMap(observed, 90);
+  assert.ok(!decayed.has('a'), 'pair seen 200d ago is decayed out at 90d window');
+  assert.ok(decayed.has('c'), 'recent pair kept');
+  assert.ok(decayed.has('e'), 'legacy pair with no timestamp is kept');
+
+  // decayDays = 0 disables decay (everything kept).
+  const all = observedPeersMap(observed, 0);
+  assert.ok(all.has('a') && all.has('c') && all.has('e'), 'decayDays=0 keeps all pairs');
+
+  // Count stays integer and truthful.
+  assert.strictEqual(decayed.get('c')[0].sessionCommits, 2, 'session count preserved');
+}
+
+// ---------------------------------------------------------------------------
+// runInit — writes .vectora/.gitignore so decisions.json is the shared rulebook
+// ---------------------------------------------------------------------------
+
+{
+  const dir = makeTmpRepo({ 'src/a.ts': 'export const a = 1;' });
+  const orig = console.log; console.log = () => {};
+  try { runInit({ root: dir, silent: true }); } finally { console.log = orig; }
+  const ig = fs.readFileSync(path.join(dir, '.vectora', '.gitignore'), 'utf8');
+  assert.ok(/^\*$/m.test(ig), 'gitignore ignores everything by default');
+  assert.ok(/!decisions\.json/.test(ig), 'decisions.json is un-ignored (committable)');
   rmTmp(dir);
 }
 

@@ -33,6 +33,7 @@ const VALID_CONFIG_FIELDS = new Set([
   'pivotThreshold', 'refreshAfterHours', 'refreshAfterChanges',
   'forcePivots', 'exclude', 'domains', 'languages',
   'configDownweight', 'coChangeMaxFiles', 'tsConfigPath',
+  'observedDecayDays',
 ]);
 
 const SOURCE_EXTENSIONS = /\.(js|jsx|ts|tsx|py|go|rs|rb)$/;
@@ -1287,6 +1288,12 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
   };
 
   fs.mkdirSync(path.join(root, '.vectora'), { recursive: true });
+  // Manage .vectora's own .gitignore: everything is per-developer EXCEPT
+  // decisions.json — the shared, committable rulebook that replaces CLAUDE.md.
+  const vIgnore = path.join(root, '.vectora', '.gitignore');
+  if (!fs.existsSync(vIgnore)) {
+    fs.writeFileSync(vIgnore, '*\n!.gitignore\n!decisions.json\n', 'utf8');
+  }
   fs.writeFileSync(
     path.join(root, '.vectora', 'graph.json'),
     JSON.stringify(graph, null, 2),
@@ -1317,16 +1324,21 @@ function runInit({ silent = false, root = process.cwd() } = {}) {
     if (isFirstInit) {
       console.log('');
       console.log('[VECTORA SEED]');
-      console.log('First graph built on this repo. Before your first coding task:');
-      console.log('  1. Run /vectora overview — read the domain + pivot summary.');
-      console.log('  2. Run /vectora why <top-pivot-file> for each of the top 3 pivot files.');
-      console.log('  3. Synthesize 3–7 architectural rules (invariants, coupling constraints,');
-      console.log('     patterns the graph reveals). Use your judgment as an LLM — this is');
-      console.log('     exactly where LLM reasoning adds value that zero-token init cannot.');
-      console.log('  4. Propose each rule to the user. On approval:');
-      console.log('     npx vectora learn "<rule>" [--domain <domain>]');
-      console.log('  Also consider: /vectora migrate — extracts rules from CLAUDE.md,');
-      console.log('  README.md, or any existing rule/convention files in the repo.');
+      console.log('First graph built on this repo. vectora is now this project\'s scoped');
+      console.log('replacement for CLAUDE.md: instead of one static file loaded into context');
+      console.log('every turn, it surfaces only the rules a task actually touches. Seed that');
+      console.log('memory now (the graph build was 0 tokens — this rule step is where LLM');
+      console.log('reasoning earns its keep):');
+      console.log('  1. Run /vectora migrate — auto-discovers CLAUDE.md, README.md,');
+      console.log('     .cursorrules, CONTRIBUTING.md, and other convention files. Extract the');
+      console.log('     architectural rules from them.');
+      console.log('  2. Run /vectora overview, then /vectora why <file> on the top 3 pivots —');
+      console.log('     add any invariants/coupling constraints the graph reveals.');
+      console.log('  3. Tag each rule with the domain it governs so it surfaces per-task:');
+      console.log('     npx vectora learn "<rule>" --domain <domain>   (omit --domain if global)');
+      console.log('  4. Propose every rule to the user before writing it. Then tell them:');
+      console.log('     vectora now carries these as scoped rules — surfaced only on tasks that');
+      console.log('     touch the relevant files. CLAUDE.md can be slimmed to a pointer.');
       console.log('[END VECTORA SEED]');
     }
   }
@@ -1353,12 +1365,25 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
     return runInit({ silent, root });
   }
 
+  const printDiffSummary = (g, note) => {
+    if (silent) return;
+    const fileCount = (g.files || []).length;
+    const domainCount = Object.keys(g.domains || {}).length;
+    const domainPart = domainCount ? ` · ${domainCount} domain${domainCount > 1 ? 's' : ''}` : '';
+    let agePart = '';
+    if (g.generated) {
+      const ageH = Math.round((Date.now() - new Date(g.generated).getTime()) / 3600000);
+      agePart = ageH < 1 ? ' · built just now' : ` · built ${ageH}h ago`;
+    }
+    console.log(`${note}\n  ${fileCount} files${domainPart}${agePart}`);
+  };
+
   const currentHash = getGitHash(root);
   if (!currentHash || currentHash === graph.gitHash) {
     // Check dirty flag
     const dirtyPath = path.join(root, '.vectora', 'dirty');
     if (!fs.existsSync(dirtyPath)) {
-      if (!silent) console.log('vectora: graph is current — nothing to update');
+      printDiffSummary(graph, 'vectora: graph is current — nothing to update');
       return true;
     }
   }
@@ -1376,7 +1401,7 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
   }
 
   if (changedFiles.length === 0) {
-    if (!silent) console.log('vectora: graph is current — nothing to update');
+    printDiffSummary(graph, 'vectora: graph is current — nothing to update');
     return true;
   }
 
@@ -1437,7 +1462,7 @@ function runDiff({ silent = false, root = process.cwd() } = {}) {
 
   fs.writeFileSync(path.join(root, '.vectora', 'graph.json'), JSON.stringify(updatedGraph, null, 2), 'utf8');
 
-  if (!silent) console.log(`done (${changedFiles.length} files updated)`);
+  printDiffSummary(updatedGraph, `vectora: updated ${changedFiles.length} file${changedFiles.length > 1 ? 's' : ''}`);
   return true;
 }
 
@@ -1491,21 +1516,165 @@ function runMap(task, { root = process.cwd() } = {}) {
   const graph = loadGraphForTask(root, 'map');
   if (!graph) return;
 
-  const matched = findSeeds(graph.files || [], task);
-  const seeds = matched.slice(0, 6);
-  const observedPeers = observedPeersMap(loadObserved(root));
-  const nb = expandNeighborhood(seeds, graph, observedPeers);
+  const files = graph.files || [];
+  const byPath = new Map(files.map(f => [f.path, f]));
+  const decayDays = mergeConfig(loadConfig(root)).observedDecayDays;
+  const observedPeers = observedPeersMap(loadObserved(root), decayDays);
 
-  emitMap(task, graph, seeds, nb, root);
+  // Decompose the prompt into one or more tasks (offline heuristic, no LLM).
+  // Each task gets its own scoped seed set + neighborhood so the agent loads
+  // only the slice that task touches — the whole point is keeping context lean.
+  const taskList = splitTasks(task);
+  const scopes = taskList.map(t => {
+    const seeds = findSeeds(files, t.text).slice(0, 6);
+    const nb = expandNeighborhood(seeds, graph, observedPeers);
+    return { text: t.text, verb: t.verb, seeds, nb };
+  });
 
-  // Persist what we surfaced so `vectora check` can produce an honest receipt.
+  const routing = classifyRouting(scopes);
+
+  if (scopes.length > 1) emitMultiMap(scopes, routing, graph, root);
+  else emitMap(scopes[0].text, graph, scopes[0].seeds, scopes[0].nb, root);
+
+  // Reconcile data for the honest receipt: union of every task's scope so
+  // `vectora check` covers the whole prompt, plus the counts the involvement
+  // banner reports back (facts only — never an invented token number).
+  const unionSeeds = [...new Set(scopes.flatMap(s => s.seeds.map(x => x.path)))];
+  const unionCoChange = dedupeCoChange(scopes.flatMap(s => s.nb.coChange));
+  const scopedSet = new Set();
+  scopes.forEach((s, i) => routing.fileSets[i].forEach(f => scopedSet.add(f)));
+  const unionDomains = [...new Set(
+    scopes.flatMap(s => s.seeds.map(x => byPath.get(x.path)?.domain)).filter(Boolean)
+  )];
+  const rulesApplied = collectDecisions(root, unionDomains).length;
+
   persistLastMap(root, {
     task,
     generatedAt: new Date().toISOString(),
     gitHash: graph.gitHash || null,
-    seeds: seeds.map(s => s.path),
-    coChange: nb.coChange,
+    seeds: unionSeeds,
+    coChange: unionCoChange,
+    taskCount: scopes.length,
+    scopedFileCount: scopedSet.size,
+    indexedFileCount: files.length,
+    rulesApplied,
+    // Per-task file scopes — let `check` record session co-change WITHIN a task
+    // instead of pairing files across independent tasks bundled in one prompt.
+    taskScopes: scopes.map((_, i) => [...routing.fileSets[i]]),
   });
+}
+
+// Group edited files by the task scope they fall into, so session co-change is
+// only recorded among files that belong to the SAME task. Files from
+// independent tasks (disjoint scopes) are never paired. Falls back to a single
+// group when there were no task scopes (no prior map, or a single task) —
+// preserving the original behavior.
+function groupEditedByTask(edited, taskScopes) {
+  if (!Array.isArray(taskScopes) || taskScopes.length === 0) return [edited];
+  const scopeSets = taskScopes.map(s => new Set(s));
+  const groups = scopeSets.map(() => []);
+  const orphans = [];
+  for (const f of edited) {
+    let placed = false;
+    scopeSets.forEach((set, i) => {
+      if (set.has(f)) { groups[i].push(f); placed = true; }
+    });
+    if (!placed) orphans.push(f);
+  }
+  if (orphans.length) groups.push(orphans);
+  return groups.filter(g => g.length);
+}
+
+// Split a prompt into discrete tasks. Offline, deterministic, no LLM. Splits on
+// explicit list markers (1. / 2. / -), and on connectives that join imperative
+// clauses ("then", "and then", "also", "after that", "; "). A fragment that
+// carries no imperative verb is folded back into the previous task so a single
+// rich sentence isn't shattered. < 2 verbs ⇒ treated as one task (status quo).
+const IMPERATIVE_VERBS = /\b(fix|add|update|remove|delete|rename|refactor|implement|create|move|write|wire|test|change|make|support|handle|build|improve|optimi[sz]e|migrate|replace|integrate|expose|enable|disable|extract|split|merge|document|set\s?up|hook|patch)\b/i;
+
+function splitTasks(prompt) {
+  if (!prompt || !prompt.trim()) return [{ text: prompt || '', verb: null }];
+  const trimmed = prompt.trim();
+
+  let segments;
+  const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const listLines = lines.filter(l => /^(\d+[.)]|[-*•])\s+/.test(l));
+  if (listLines.length >= 2) {
+    segments = listLines.map(l => l.replace(/^(\d+[.)]|[-*•])\s+/, '').trim());
+  } else {
+    segments = trimmed
+      .split(/\s*;\s*|\s*\n\s*|\s*,?\s+\b(?:and then|then|after that|afterwards|and also|also|next|additionally)\b\s+/i)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  let tasks = segments.map(s => {
+    const m = s.match(IMPERATIVE_VERBS);
+    return { text: s, verb: m ? m[1].toLowerCase() : null };
+  });
+
+  // Fold verb-less fragments back into the preceding task.
+  const folded = [];
+  for (const t of tasks) {
+    if (t.verb === null && folded.length) folded[folded.length - 1].text += ', ' + t.text;
+    else folded.push(t);
+  }
+  tasks = folded;
+
+  const withVerb = tasks.filter(t => t.verb);
+  if (withVerb.length < 2) return [{ text: prompt, verb: tasks[0]?.verb || null }];
+  return tasks.slice(0, 5);
+}
+
+// Classify how the tasks relate, from their scoped file sets. Independent tasks
+// (disjoint scope) are parallel-agent candidates; overlapping tasks should run
+// in order to share context. Pure information for the agent — it decides.
+function classifyRouting(scopes) {
+  const fileSets = scopes.map(s => new Set([
+    ...s.seeds.map(x => x.path),
+    ...s.nb.neighbors.slice(0, 6).map(n => n.path),
+  ]));
+  const overlaps = []; // [i, j, sharedCount]
+  for (let i = 0; i < scopes.length; i++) {
+    for (let j = i + 1; j < scopes.length; j++) {
+      let shared = 0;
+      for (const f of fileSets[i]) if (fileSets[j].has(f)) shared++;
+      if (shared > 0) overlaps.push([i, j, shared]);
+    }
+  }
+  const independent = [];
+  for (let i = 0; i < scopes.length; i++) {
+    if (!overlaps.some(o => o[0] === i || o[1] === i)) independent.push(i);
+  }
+  return { fileSets, overlaps, independent };
+}
+
+function buildRoutingLines(scopes, routing) {
+  if (scopes.length <= 1) return ['single task'];
+  const lines = [];
+  for (const [i, j] of routing.overlaps) {
+    lines.push(`tasks ${i + 1} & ${j + 1} share scope → run in order, reuse context.`);
+  }
+  if (routing.independent.length >= 2) {
+    const nums = routing.independent.map(i => i + 1).join(' & ');
+    lines.push(`tasks ${nums} are independent (disjoint scope) → parallel sub-agents keep context small.`);
+  } else if (routing.independent.length === 1 && routing.overlaps.length) {
+    lines.push(`task ${routing.independent[0] + 1} is independent → can run in parallel.`);
+  }
+  if (!lines.length) lines.push(`${scopes.length} tasks, scopes overlap → run in order, reuse context.`);
+  return lines;
+}
+
+function dedupeCoChange(list) {
+  const seen = new Set();
+  const out = [];
+  for (const c of list) {
+    const key = [c.a, c.b].sort().join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
 }
 
 // Transparent seed matching: which files does the task text name directly?
@@ -1606,21 +1775,34 @@ function expandNeighborhood(seeds, graph, observedPeers = new Map()) {
 // ─── Session-observed coupling ledger ─────────────────────────────────────────
 // `.vectora/observed.json` records pairs of files YOU edited together, tallied
 // across sessions. It supplements git co-change and, on a repo with no history,
-// stands in for it entirely. Per-developer signal — not meant to be committed.
+// stands in for it entirely. Per-developer signal (like the ledger) — not
+// committed; only decisions.json (the shared rulebook) is. Recency-decayed.
 
 function loadObserved(root) {
   const p = path.join(root, '.vectora', 'observed.json');
   try {
     const d = JSON.parse(fs.readFileSync(p, 'utf8'));
-    return (d && typeof d.pairs === 'object') ? d : { pairs: {} };
-  } catch { return { pairs: {} }; }
+    if (d && typeof d.pairs === 'object') { d.seen = d.seen || {}; return d; }
+    return { pairs: {}, seen: {} };
+  } catch { return { pairs: {}, seen: {} }; }
 }
 
-function observedPeersMap(observed) {
+// Build the per-file peer list. `decayDays` (optional) drops pairs not seen
+// within the window — recency decay so a coupling from a year ago doesn't count
+// like one from today. Legacy pairs with no `seen` timestamp are always kept
+// (never silently discard pre-upgrade history). Counts stay integer, so the
+// `sessions M×` label remains truthful.
+function observedPeersMap(observed, decayDays = 0) {
   const map = new Map(); // path -> [{ partner, sessionCommits }]
+  const seen = observed.seen || {};
+  const cutoff = decayDays > 0 ? Date.now() - decayDays * 24 * 3600 * 1000 : 0;
   for (const [key, count] of Object.entries(observed.pairs || {})) {
     const [a, b] = key.split('|');
     if (!a || !b) continue;
+    if (cutoff && seen[key]) {
+      const t = new Date(seen[key]).getTime();
+      if (!isNaN(t) && t < cutoff) continue; // stale — decayed out
+    }
     if (!map.has(a)) map.set(a, []);
     if (!map.has(b)) map.set(b, []);
     map.get(a).push({ partner: b, sessionCommits: count });
@@ -1636,109 +1818,124 @@ function recordObserved(root, editedFiles, maxFiles = 15) {
   if (files.length < 2 || files.length > maxFiles) return;
   const observed = loadObserved(root);
   observed.pairs = observed.pairs || {};
+  observed.seen = observed.seen || {};
+  const now = new Date().toISOString();
   for (let i = 0; i < files.length; i++) {
     for (let j = i + 1; j < files.length; j++) {
       const key = [files[i], files[j]].sort().join('|');
       observed.pairs[key] = (observed.pairs[key] || 0) + 1;
+      observed.seen[key] = now; // recency stamp for decay
     }
   }
-  observed.updated = new Date().toISOString();
+  observed.updated = now;
   try {
     fs.mkdirSync(path.join(root, '.vectora'), { recursive: true });
     fs.writeFileSync(path.join(root, '.vectora', 'observed.json'), JSON.stringify(observed, null, 2), 'utf8');
   } catch {}
 }
 
+// Lean single-task map. Deliberately terse — the agent reads this every task,
+// so every line must earn its tokens. No boxed banner, no verbose neighborhood
+// dump; neighbors fold into one FILES line. Scoped RULES replace a CLAUDE.md
+// blob: only the rules whose domain this task touches are surfaced.
 function emitMap(task, graph, seeds, nb, root) {
   const files = graph.files || [];
   const byPath = new Map(files.map(f => [f.path, f]));
-  const label = graph.projectMeta?.label || graph.language || 'codebase';
-  const pad = (s, n) => String(s).length > n ? String(s).slice(0, n) : String(s).padEnd(n);
 
   console.log('[VECTORA MAP]');
-  const head = seeds.length
-    ? `${seeds.length} seed${seeds.length > 1 ? 's' : ''} matched your task`
-    : 'no keyword match — most central files shown as entry points';
-  const banner = `╔─ vectora · ${label} `;
-  console.log(banner + '─'.repeat(Math.max(0, 65 - banner.length)) + '╗');
-  console.log(`│ ${pad(head, 61)} │`);
-  console.log('╚' + '─'.repeat(63) + '╝');
-  console.log('');
+  const scopeNeighbors = Math.min(nb.neighbors.length, 6);
+  const scopeFiles = seeds.length + scopeNeighbors;
+  console.log(`vectora · ${files.length} files indexed → ${scopeFiles} in scope for "${truncateTask(task, 50)}"`);
 
-  // DANGER ZONES — surfaces @vectora danger: annotations before anything else.
-  // These are co-located with the code they guard; the agent must see them first.
-  const dangersInScope = [];
-  const seedAndCoChangePaths = new Set([
-    ...seeds.map(s => s.path),
-    ...nb.coChange.flatMap(c => [c.a, c.b]),
-  ]);
-  for (const fp of seedAndCoChangePaths) {
+  // Scoped institutional memory (the CLAUDE.md replacement).
+  const seedDomains = [...new Set(seeds.map(s => byPath.get(s.path)?.domain).filter(Boolean))];
+  const rules = collectDecisions(root, seedDomains);
+  if (rules.length) {
+    console.log('RULES:     ' + rules.slice(0, 4).map(r => r.rule).join(' · '));
+  }
+
+  // DANGER ZONES — @vectora danger: annotations co-located with guarded code.
+  const dangerPaths = new Set([...seeds.map(s => s.path), ...nb.coChange.flatMap(c => [c.a, c.b])]);
+  for (const fp of dangerPaths) {
     const f = byPath.get(fp);
-    if (f && f.dangerZones && f.dangerZones.length) {
-      for (const dz of f.dangerZones) dangersInScope.push({ file: fp, text: dz });
-    }
-  }
-  if (dangersInScope.length) {
-    console.log('⚠ DANGER ZONES — constraints on files in your edit scope:');
-    for (const { file, text } of dangersInScope) {
-      console.log(`  ⚠ ${shortPath(file)}: "${text}"`);
-    }
-    console.log('');
+    if (f && f.dangerZones) for (const dz of f.dangerZones) console.log(`⚠ DANGER:  ${shortPath(fp)}: "${dz}"`);
   }
 
-  // CO-CHANGE leads — it's the signal the agent cannot compute on its own.
-  console.log('CO-CHANGE (edited together in git history + your sessions — grep cannot reveal these):');
-  if (nb.coChange.length === 0) {
-    console.log('  (none yet — no git co-change and no session history for these seeds)');
-  } else {
-    const seenCC = new Set();
-    for (const c of nb.coChange) {
-      const key = [c.a, c.b].sort().join('|');
-      if (seenCC.has(key)) continue;
-      seenCC.add(key);
-      console.log(`  ${pad(shortPath(c.a) + ' + ' + shortPath(c.b), 50)} ${coChangeLabel(c)}`);
-      if (seenCC.size >= 8) break;
-    }
+  // CO-CHANGE — the signal the agent cannot compute on its own (top 3).
+  const cc = dedupeCoChange(nb.coChange).slice(0, 3);
+  if (cc.length) {
+    console.log('CO-CHANGE: ' + cc.map(c => `${shortPath(c.a)} + ${shortPath(c.b)} (${coChangeLabel(c)})`).join(' · '));
   }
 
-  console.log('');
   console.log('START HERE (open by your own judgment — nothing is hidden):');
   if (seeds.length) {
     for (const s of seeds) {
       const f = byPath.get(s.path);
-      const meta = f ? `[${f.lineCount} lines · in:${f.inDegree || 0}]` : '';
-      console.log(`  ${pad(s.path, 44)} ${meta}  (${s.reasons.join('; ')})`);
-      if (f) {
-        const reach = transitiveDependents(graph, s.path).size;
-        if (reach >= 5) console.log(`  ${' '.repeat(44)} ⚠ blast radius: ${reach} dependents — edit exported signatures with care`);
-      }
+      const meta = f ? `[${f.lineCount}L · in:${f.inDegree || 0}]` : '';
+      const reach = f ? transitiveDependents(graph, s.path).size : 0;
+      const blast = reach >= 5 ? `  ⚠ blast:${reach}` : '';
+      console.log(`  ${s.path} ${meta} (${s.reasons.join('; ')})${blast}`);
     }
   } else {
     const central = [...files].sort((a, b) => (b.inDegree || 0) - (a.inDegree || 0)).slice(0, 5);
-    for (const f of central) {
-      console.log(`  ${pad(f.path, 44)} [${f.lineCount} lines · in:${f.inDegree || 0}]  (central)`);
-    }
+    for (const f of central) console.log(`  ${f.path} [in:${f.inDegree || 0}] (central)`);
   }
 
-  console.log('');
-  console.log('NEIGHBORHOOD (graph-connected — may be relevant):');
-  if (nb.neighbors.length === 0) {
-    console.log('  (none — seeds have no resolved import edges)');
-  } else {
-    for (const n of nb.neighbors.slice(0, 6)) {
-      const f = byPath.get(n.path);
-      const meta = f ? `[in:${f.inDegree || 0}]` : '';
-      console.log(`  ${pad(n.path, 44)} ${meta}  ${n.relations.slice(0, 2).join(', ')}`);
-    }
-    if (nb.neighbors.length > 6) console.log(`  …and ${nb.neighbors.length - 6} more (run \`npx vectora why <file>\` for details)`);
+  // Neighbors folded into a single line — relevant, but not worth a block each.
+  if (nb.neighbors.length) {
+    const names = nb.neighbors.slice(0, 6).map(n => shortPath(n.path));
+    const more = nb.neighbors.length > 6 ? ` …+${nb.neighbors.length - 6}` : '';
+    console.log('FILES:     ' + names.join(' · ') + more);
   }
 
-  const seedDomains = [...new Set(seeds.map(s => byPath.get(s.path)?.domain).filter(Boolean))];
-  printDecisions(root, seedDomains);
-
-  console.log('');
   console.log('When done, run `npx vectora check` — it catches incomplete edits even without this map.');
   console.log('[END VECTORA MAP]');
+}
+
+// Multi-task map: one compact block per detected task + a routing line. Same
+// lean discipline as emitMap — the agent should be able to skim it and route.
+function emitMultiMap(scopes, routing, graph, root) {
+  const files = graph.files || [];
+  const byPath = new Map(files.map(f => [f.path, f]));
+  const scopedSet = new Set();
+  scopes.forEach((s, i) => routing.fileSets[i].forEach(f => scopedSet.add(f)));
+
+  console.log('[VECTORA MAP]');
+  console.log(`vectora · ${scopes.length} tasks · ${files.length} files indexed → ${scopedSet.size} in scope`);
+
+  const routingLines = buildRoutingLines(scopes, routing);
+  console.log('ROUTING: ' + routingLines[0]);
+  for (const l of routingLines.slice(1)) console.log('         ' + l);
+
+  scopes.forEach((s, i) => {
+    const relevant = routing.fileSets[i];
+    console.log('');
+    console.log(`── TASK ${i + 1}/${scopes.length} · "${truncateTask(s.text, 50)}" · relevant: ${relevant.size}`);
+
+    const domains = [...new Set(s.seeds.map(x => byPath.get(x.path)?.domain).filter(Boolean))];
+    const rules = collectDecisions(root, domains);
+    if (rules.length) console.log('   RULES:     ' + rules.slice(0, 3).map(r => r.rule).join(' · '));
+
+    for (const p of relevant) {
+      const f = byPath.get(p);
+      if (f && f.dangerZones) for (const dz of f.dangerZones) console.log(`   ⚠ DANGER:  ${shortPath(p)}: "${dz}"`);
+    }
+
+    const cc = dedupeCoChange(s.nb.coChange).slice(0, 3);
+    if (cc.length) console.log('   CO-CHANGE: ' + cc.map(c => `${shortPath(c.a)} + ${shortPath(c.b)} (${coChangeLabel(c)})`).join(' · '));
+
+    if (relevant.size) console.log('   FILES:     ' + [...relevant].map(shortPath).join(' · '));
+    else console.log('   FILES:     (no keyword match — navigate by judgment)');
+  });
+
+  console.log('');
+  console.log('Load only the FILES you judge relevant per task; report `loaded: K/relevant` for each.');
+  console.log('[END VECTORA MAP]');
+}
+
+function truncateTask(s, n) {
+  s = String(s || '').replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
 function persistLastMap(root, data) {
@@ -1768,9 +1965,11 @@ function runCheck({ root = process.cwd() } = {}) {
   const lastMapPath = path.join(root, '.vectora', 'last-map.json');
   let lastMapCoChange = [];
   let lastMapTask = null;
+  let lastMap = {};
   if (fs.existsSync(lastMapPath)) {
     try {
       const last = JSON.parse(fs.readFileSync(lastMapPath, 'utf8'));
+      lastMap = last;
       sinceHash = last.gitHash || null;
       lastMapCoChange = last.coChange || [];
       lastMapTask = last.task || null;
@@ -1839,7 +2038,7 @@ function runCheck({ root = process.cwd() } = {}) {
 
   for (const c of lastMapCoChange) processPair(c.a, c.b, c.sharedCommits || 0, c.sessionCommits || 0);
   if (graph) {
-    const observedPeers = observedPeersMap(loadObserved(root));
+    const observedPeers = observedPeersMap(loadObserved(root), mergeConfig(loadConfig(root)).observedDecayDays);
     const byPath = new Map((graph.files || []).map(f => [f.path, f]));
     for (const ed of edited) {
       const f = byPath.get(ed);
@@ -1907,8 +2106,11 @@ function runCheck({ root = process.cwd() } = {}) {
     console.log('  no co-change or caller links among your edits — your changes were structurally isolated.');
   }
 
-  // Learn from this task + persist the ledger event.
-  recordObserved(root, edited);
+  // Learn from this task + persist the ledger event. Record session co-change
+  // WITHIN each task's scope so independent tasks bundled in one prompt don't
+  // get falsely linked (the multi-task contamination guard).
+  const editGroups = groupEditedByTask(edited, lastMap.taskScopes);
+  for (const g of editGroups) recordObserved(root, g);
   recordLedger(root, {
     task: lastMapTask,
     editedFiles: edited,
@@ -1949,7 +2151,39 @@ function runCheck({ root = process.cwd() } = {}) {
     }
   }
 
+  // Honest involvement banner — shown every time the prompt flow finishes.
+  // Every figure is a reconciled fact (scope from last-map, results from this
+  // check). No invented token number, ever.
+  emitInvolvementBanner({
+    taskCount: lastMap.taskCount || 1,
+    scopedFileCount: lastMap.scopedFileCount != null ? lastMap.scopedFileCount : edited.length,
+    indexedFileCount: lastMap.indexedFileCount != null ? lastMap.indexedFileCount : (graph ? (graph.files || []).length : 0),
+    rulesApplied: lastMap.rulesApplied || 0,
+    coChangeSurfaced: surfaced.length,
+    callerCount: callerWarnings.length,
+    breaks: confirmedBreaks.length,
+  });
+
   console.log('[END VECTORA CHECK]');
+}
+
+// Draw the involvement banner. Facts only: how tightly vectora scoped the
+// prompt, which rules it surfaced, what its safety net caught.
+function emitInvolvementBanner(s) {
+  const lines = [];
+  const scopeTxt = s.indexedFileCount
+    ? `scoped to ${s.scopedFileCount} of ${s.indexedFileCount} indexed files`
+    : `scoped to ${s.scopedFileCount} files`;
+  lines.push(`${s.taskCount} task${s.taskCount === 1 ? '' : 's'} · ${scopeTxt}`);
+  lines.push(`rules applied: ${s.rulesApplied}  ·  co-change links surfaced: ${s.coChangeSurfaced}`);
+  lines.push(`check: ${s.callerCount} caller${s.callerCount === 1 ? '' : 's'} to verify · ${s.breaks} confirmed break${s.breaks === 1 ? '' : 's'}`);
+  lines.push('vectora narrowed the field — each task saw only its slice');
+  const W = Math.max(...lines.map(l => l.length));
+  const title = ' vectora · this prompt ';
+  console.log('');
+  console.log('╭' + title + '─'.repeat(Math.max(0, W + 2 - title.length)) + '╮');
+  for (const l of lines) console.log('│ ' + l.padEnd(W) + ' │');
+  console.log('╰' + '─'.repeat(W + 2) + '╯');
 }
 
 // ─── Ledger ───────────────────────────────────────────────────────────────────
@@ -2178,32 +2412,31 @@ function getEditedFiles(root, sinceHash) {
 }
 
 
-function printDecisions(root, domains) {
+// Scoped institutional memory — the dynamic replacement for CLAUDE.md. Returns
+// the rules that apply to the given domains (plus globals), so callers can
+// surface only what the current task touches instead of dumping every rule.
+function collectDecisions(root, domains) {
   const decisionsPath = path.join(root, '.vectora', 'decisions.json');
-  if (!fs.existsSync(decisionsPath)) return;
-  
+  if (!fs.existsSync(decisionsPath)) return [];
   let d;
-  try { d = JSON.parse(fs.readFileSync(decisionsPath, 'utf8')); }
-  catch { return; }
-
+  try { d = JSON.parse(fs.readFileSync(decisionsPath, 'utf8')); } catch { return []; }
   const rules = [];
-  if (d.global && Array.isArray(d.global)) {
-    for (const rule of d.global) rules.push(`  - [global] ${rule}`);
-  }
-  
+  if (Array.isArray(d.global)) for (const r of d.global) rules.push({ scope: 'global', rule: r });
   if (d.domains && typeof d.domains === 'object') {
-    for (const domain of domains) {
-      const domainRules = d.domains[domain];
-      if (domainRules && Array.isArray(domainRules)) {
-        for (const rule of domainRules) rules.push(`  - [${domain}] ${rule}`);
-      }
+    for (const domain of domains || []) {
+      const dr = d.domains[domain];
+      if (Array.isArray(dr)) for (const r of dr) rules.push({ scope: domain, rule: r });
     }
   }
+  return rules;
+}
 
+function printDecisions(root, domains) {
+  const rules = collectDecisions(root, domains);
   if (rules.length > 0) {
     console.log('');
     console.log('INSTITUTIONAL MEMORY (Must follow):');
-    for (const rule of rules) console.log(rule);
+    for (const r of rules) console.log(`  - [${r.scope}] ${r.rule}`);
   }
 }
 
@@ -3432,6 +3665,7 @@ function mergeConfig(userConfig) {
     coChangeMaxFiles: userConfig.coChangeMaxFiles ?? 15,
     configDownweight: userConfig.configDownweight ?? true,
     tsConfigPath: userConfig.tsConfigPath ?? null,
+    observedDecayDays: userConfig.observedDecayDays ?? 90,
   };
 }
 
@@ -3579,6 +3813,10 @@ module.exports = {
   loadWorkspacePackages,
   probeExtensions,
   resolveAlias,
+  splitTasks,
+  classifyRouting,
+  collectDecisions,
+  groupEditedByTask,
 };
 
 if (require.main === module) main();

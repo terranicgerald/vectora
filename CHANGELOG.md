@@ -1,5 +1,45 @@
 # Changelog
 
+## [2.5.1] — 2026-06-30
+
+**Cross-session memory hardening.** Fixes a contamination bug the v2.5 multi-task work introduced, adds recency decay, and makes the rulebook shareable.
+
+### Fixed
+- **Independent tasks no longer cross-contaminate session co-change.** `check` now records session-observed pairs *within each task's scope* instead of pairing every file edited in a prompt. Multi-task prompts deliberately bundle independent, disjoint-scope tasks; previously `recordObserved` linked their files, writing false couplings into `observed.json`. `map` now persists per-task `taskScopes` in `last-map.json`, and a new `groupEditedByTask` confines recording to task boundaries (falls back to the whole edit set when there was no prior map).
+
+### Added
+- **Recency decay on `observed.json`** — a parallel `seen` timestamp map; `observedPeersMap` drops pairs not seen within `observedDecayDays` (default 90; configurable in `vectora.config.js`). Legacy pairs with no timestamp are always kept; counts stay integer so the `sessions M×` label remains truthful.
+- **Committed, team-shared rulebook** — `init` writes `.vectora/.gitignore` that tracks only `decisions.json` (the CLAUDE.md replacement) and ignores the per-developer graph, session coupling, and ledger. Commit `decisions.json` to share one rulebook across the team.
+
+## [2.5.0] — 2026-06-30
+
+**The scoped replacement for CLAUDE.md: per-task routing, lean context, honest involvement.** The headline shifts from "proves your edit is complete" (arity breaks, demoted to a secondary safety net) to the value users actually feel every prompt — vectora hands the agent the minimal relevant files and only the rules a task touches, instead of a static CLAUDE.md bloating context every turn.
+
+### Added
+- **Task decomposition in `map`** — `splitTasks` splits a prompt into discrete tasks (list markers, connectives like "then"/"and also", imperative-verb boundaries; verb-less fragments fold back; <2 verbs ⇒ one task). Each task gets its own scoped seed set + neighborhood.
+- **Routing classification** — `classifyRouting` labels tasks single / chained-sequential (shared scope) / independent-parallel (disjoint scope) from their file sets. The `ROUTING:` line tells the agent when parallel sub-agents keep each context small. The agent decides.
+- **Per-task `emitMultiMap`** — one compact block per task: `relevant: N`, scoped `RULES`, `CO-CHANGE`, and a single `FILES` line. The agent reports `loaded: K/relevant` per task.
+- **Honest involvement banner** — `vectora check` now closes every prompt with a facts-only box: tasks, files scoped-to of total indexed, rules applied, co-change links surfaced, breaks/callers caught. **No invented token number.** Reconciled from `last-map.json` + the real `git diff`.
+- **Scoped institutional memory** — `collectDecisions` returns only the rules whose domain a task touches; `map` surfaces them inline. The CLAUDE.md upgrade: relevant rules per task, not the whole rulebook every turn.
+
+### Changed
+- **`emitMap` rewritten lean** — boxed banner and verbose NEIGHBORHOOD dump removed; neighbors fold into one `FILES` line; co-change capped to top 3. Materially fewer tokens per map.
+- **First-init `[VECTORA SEED]`** reframed to drive CLAUDE.md/README rule extraction into vectora's scoped memory (graph build stays 0 tokens; rule seeding is the intentional LLM step).
+- **SKILL / README / package description** repositioned around scoping + routing + the CLAUDE.md replacement; arity/`check` demoted to a post-edit safety net.
+
+## [2.4.1] — 2026-06-30
+
+**UX hardening: guaranteed-trigger prompt command, self-reporting diff, and context visibility.**
+
+### Added
+- **`/vectora prompt <task>`** — guaranteed-trigger form of the map→navigate→check loop. Bypasses activation checks and follow-up detection entirely. Use when you want vectora to run unconditionally regardless of prompt length or phrasing. The skill `## /vectora prompt` section is placed above the standard `/vectora <task>` section so it takes priority.
+- **Context line in every map** — `[VECTORA MAP]` now emits `context: N files indexed · M in task scope (S seeds + N neighbors)` immediately after the banner. Agents and users can see at a glance how much of the codebase is indexed and how many files are in scope for this task.
+- **`vectora diff` always reports graph state** — previously `diff` silently returned when the graph was already current. Now it always prints a summary: `vectora: graph is current — nothing to update\n  247 files · 3 domains · built 2h ago`. Whether or not anything changed, you see the state of the graph.
+
+### Changed
+- `skill/SKILL.src.md` version bumped to 2.4.1; `/vectora diff` section updated to describe the new always-emit summary.
+- README rewritten: leads with `✗ BROKEN` proof as primary selling point, adds "In 30 seconds" terminal example at the top, splits commands table into Core / Exploration / Memory tiers, removes outdated TS alias limitation note (fixed in 2.4.0).
+
 ## [2.4.0] — 2026-06-30
 
 **Fix the import graph for the repos that matter most.** TypeScript path aliases (`@/`, `~/`, `#lib/`), `jsconfig.json` `baseUrl`, and monorepo workspace cross-package imports now resolve to real files. Plus: seamless institutional memory capture — LLM-driven rule seeding on first init, architectural signal detection in `check`, and zero-arg `migrate` that auto-discovers CLAUDE.md, README, and convention files.
