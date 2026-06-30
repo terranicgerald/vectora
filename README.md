@@ -5,6 +5,8 @@
 [![Node.js >=18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/7ed43ef4-3eb1-4c8e-a5f6-66e286b97e21" />
+
 **Your AI agent loads everything. vectora fixes that.**
 
 Instead of dumping your whole project into context every turn, vectora gives the agent only the files, rules, and co-change signals it actually needs — targeted to the task at hand. Patterns you establish get learned automatically. Rules you set manually persist across every session.
