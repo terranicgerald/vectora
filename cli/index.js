@@ -73,6 +73,55 @@ const PROGRAMMING_STOPWORDS = new Set([
   'format', 'check', 'valid', 'test', 'mock', 'stub', 'fake', 'temp',
 ]);
 
+// ─── Box Renderer ────────────────────────────────────────────────────────────
+
+const BOX_WIDTH = 64;
+
+/**
+ * Render a bordered box as a string.
+ * @param {string} title
+ * @param {string[]} lines
+ * @param {object} [opts]
+ * @returns {string}
+ */
+function box(title, lines, opts = {}) {
+  const useFancy = process.stdout.isTTY && !process.env.NO_COLOR;
+  const tl = useFancy ? '╭' : '+';
+  const tr = useFancy ? '╮' : '+';
+  const bl = useFancy ? '╰' : '+';
+  const br = useFancy ? '╯' : '+';
+  const hz = useFancy ? '─' : '-';
+  const vt = useFancy ? '│' : '|';
+  const boldOn  = useFancy ? '\x1b[1m' : '';
+  const boldOff = useFancy ? '\x1b[0m' : '';
+
+  // Build top border: tl + hz + ' ' + title + ' ' + hz... + tr  (total BOX_WIDTH)
+  const titleStr = `${boldOn}${title}${boldOff}`;
+  // Visible length of title (without ANSI escapes)
+  const titleVis = title.length;
+  // Content between tl and tr must be BOX_WIDTH - 2 chars wide
+  const inner = BOX_WIDTH - 2;
+  // Pattern: hz + ' ' + title + ' ' + hz*(remaining)
+  const prefix = hz + ' ' + titleStr + ' ';
+  const prefixVis = 1 + 1 + titleVis + 1; // hz + space + title + space
+  const remaining = Math.max(0, inner - prefixVis);
+  const top = tl + hz + ' ' + titleStr + ' ' + hz.repeat(remaining) + tr;
+
+  const bottom = bl + hz.repeat(inner) + br;
+
+  const innerWidth = BOX_WIDTH - 4; // 2 for borders, 2 for padding
+  const bodyLines = lines.map(l => {
+    const padded = '  ' + l;
+    const truncated = padded.length > innerWidth + 2
+      ? padded.slice(0, innerWidth + 2 - 1) + '…'
+      : padded;
+    const padRight = ' '.repeat(Math.max(0, innerWidth - truncated.length + 2));
+    return `${vt}${truncated}${padRight}${vt}`;
+  });
+
+  return [top, ...bodyLines, bottom].join('\n');
+}
+
 // ─── Main Dispatcher ──────────────────────────────────────────────────────────
 
 function main() {
@@ -1526,14 +1575,80 @@ function runMap(task, { root = process.cwd() } = {}) {
   // only the slice that task touches — the whole point is keeping context lean.
   const taskList = splitTasks(task);
   const scopes = taskList.map(t => {
-    const seeds = findSeeds(files, t.text).slice(0, 6);
+    // A spec/doc file named in the prompt (e.g. "read DESIGN.md and …") is the
+    // authority for the task but lives outside the import graph, so findSeeds
+    // can never surface it. Force it into scope ahead of the graph seeds.
+    const specSeeds = findSpecSeeds(t.text, root);
+    const graphSeeds = findSeeds(files, t.text).filter(s => !specSeeds.some(sp => sp.path === s.path));
+    const seeds = [...specSeeds, ...graphSeeds].slice(0, 6);
     const nb = expandNeighborhood(seeds, graph, observedPeers);
     return { text: t.text, verb: t.verb, seeds, nb };
   });
 
   const routing = classifyRouting(scopes);
 
-  if (scopes.length > 1) emitMultiMap(scopes, routing, graph, root);
+  // ── Change 2: leaf-ratio / weak-signal detection ───────────────────────────
+  // Collect the final scoped file paths across all tasks.
+  const scopedFilePaths = [...new Set(scopes.flatMap(s => [
+    ...s.seeds.map(x => x.path),
+    ...s.nb.neighbors.slice(0, 6).map(n => n.path),
+  ]))];
+  const byPathForLeaf = new Map((files || []).map(f => [f.path, f]));
+  const leafRatio = scopedFilePaths.length === 0 ? 0 :
+    scopedFilePaths.filter(fp => {
+      const node = byPathForLeaf.get(fp) || {};
+      const inDeg = (node.importedBy || []).length;
+      const outDeg = (node.importsResolved || []).length;
+      return inDeg + outDeg <= 1;
+    }).length / scopedFilePaths.length;
+  const weakSignal = leafRatio >= 0.7;
+
+  if (weakSignal) {
+    console.log('[GRAPH SIGNAL: WEAK — ≥70% of task files are leaf nodes. Co-change and caller signals sparse. Skip graph-dependent protocol steps.]');
+  }
+
+  // ── Change 3: FILES provenance box and MAP SUMMARY box ────────────────────
+  const filesConsidered = (graph.files || []).length;
+  const filesLoaded = scopedFilePaths.length;
+  const seedCount = [...new Set(scopes.flatMap(s => s.seeds.map(x => x.path)))].length;
+
+  // Load last-map to detect recently-edited files.
+  let prevMapFiles = new Set();
+  const lastMapPathForBox = path.join(root, '.vectora', 'last-map.json');
+  if (fs.existsSync(lastMapPathForBox)) {
+    try {
+      const prev = JSON.parse(fs.readFileSync(lastMapPathForBox, 'utf8'));
+      (prev.seeds || []).forEach(f => prevMapFiles.add(f));
+    } catch {}
+  }
+
+  // Load observed peers to detect co-change peers.
+  const observedPeersForBox = observedPeersMap(loadObserved(root), mergeConfig(loadConfig(root)).observedDecayDays);
+
+  const fileBoxLines = scopedFilePaths.map(fp => {
+    let tag = '';
+    if (prevMapFiles.has(fp)) tag = ' [recently edited]';
+    else if (observedPeersForBox.has(fp) && (observedPeersForBox.get(fp) || []).length > 0) tag = ' [co-change peer]';
+    return fp + tag;
+  });
+
+  const filesBoxTitle = `FILES ────────── ${filesLoaded} loaded · ${filesConsidered} considered · ${seedCount} seeded `;
+  console.log(box(filesBoxTitle, fileBoxLines));
+
+  // Determine domains and routing label for the summary box.
+  const mapDomains = [...new Set(scopes.flatMap(s =>
+    s.seeds.map(x => byPathForLeaf.get(x.path)?.domain).filter(Boolean)
+  ))];
+  const routingLabel = scopes.length <= 1 ? 'SINGLE' : (routing.independent.length >= 2 ? 'PARALLEL' : 'SEQUENTIAL');
+  const signalLabel = weakSignal ? 'WEAK (leaf file set)' : 'NORMAL';
+  const summaryLines = [
+    `Domains → ${mapDomains.length ? mapDomains.join(', ') : '(none detected)'}`,
+    `Routing → ${routingLabel}`,
+    `Signal  → ${signalLabel}`,
+  ];
+  console.log(box('VECTORA MAP', summaryLines));
+
+  if (scopes.length > 1) emitMultiMap(scopes, routing, graph, root, task);
   else emitMap(scopes[0].text, graph, scopes[0].seeds, scopes[0].nb, root);
 
   // Reconcile data for the honest receipt: union of every task's scope so
@@ -1675,6 +1790,55 @@ function dedupeCoChange(list) {
     out.push(c);
   }
   return out;
+}
+
+// Spec/doc files named in the prompt (.md/.txt/.rst). These are not in the
+// import graph — the graph indexes parsed source only — but when the prompt
+// says "read DESIGN.md and …" that file is the authority for the task and must
+// be in scope. Resolved against the repo root and verified to exist on disk;
+// no match if the file isn't there. Returns synthetic seeds ranked above graph
+// seeds so they sort first.
+function findSpecSeeds(task, root) {
+  const out = [];
+  const seen = new Set();
+  const re = /(?:^|[\s"'`(=])([\w./-]+\.(?:md|txt|rst))\b/gi;
+  let m;
+  while ((m = re.exec(task)) !== null) {
+    const rel = m[1].replace(/^\.\//, '');
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+    const abs = path.resolve(root, rel);
+    // Stay within the repo and require the file to actually exist.
+    if (!abs.startsWith(path.resolve(root))) continue;
+    try {
+      if (!fs.statSync(abs).isFile()) continue;
+    } catch { continue; }
+    out.push({ path: rel, reasons: ['spec file named in task'], rank: 6, inDegree: 0 });
+  }
+  return out;
+}
+
+// Scan the verbatim prompt for an embedded execution constraint — a permission,
+// a bound, or a stated convention. These are durable rules the user dropped into
+// the prompt ("you may relax X but only slightly", "we never do Y here") that the
+// post-task capture would otherwise miss. Returns the sentence carrying the first
+// match (trimmed), or null. Deterministic, offline — the agent proposes it to the
+// user after the receipt; vectora never writes a rule silently.
+const CONSTRAINT_PHRASES = [
+  'you may', 'feel free to', 'at your discretion', 'whenever you deem', "it's ok to", 'it is ok to',
+  'but only', 'only slightly', 'no more than', 'at most', 'sparingly',
+  'we always', 'we never', 'we prefer', 'our convention', 'by convention', 'always use', 'never use',
+];
+function findPromptConstraint(task) {
+  const sentences = task.split(/(?<=[.!?])\s+|\n+/);
+  for (const raw of sentences) {
+    const s = raw.trim();
+    const low = s.toLowerCase();
+    if (CONSTRAINT_PHRASES.some(p => low.includes(p))) {
+      return s.length > 160 ? s.slice(0, 157) + '…' : s;
+    }
+  }
+  return null;
 }
 
 // Transparent seed matching: which files does the task text name directly?
@@ -1854,6 +2018,12 @@ function emitMap(task, graph, seeds, nb, root) {
     console.log('RULES:     ' + rules.slice(0, 4).map(r => r.rule).join(' · '));
   }
 
+  // CANDIDATE RULE — a constraint the user embedded in the prompt itself.
+  const constraint = findPromptConstraint(task);
+  if (constraint) {
+    console.log(`⚑ CANDIDATE RULE: "${constraint}" — propose via /vectora learn after the receipt.`);
+  }
+
   // DANGER ZONES — @vectora danger: annotations co-located with guarded code.
   const dangerPaths = new Set([...seeds.map(s => s.path), ...nb.coChange.flatMap(c => [c.a, c.b])]);
   for (const fp of dangerPaths) {
@@ -1894,7 +2064,7 @@ function emitMap(task, graph, seeds, nb, root) {
 
 // Multi-task map: one compact block per detected task + a routing line. Same
 // lean discipline as emitMap — the agent should be able to skim it and route.
-function emitMultiMap(scopes, routing, graph, root) {
+function emitMultiMap(scopes, routing, graph, root, fullTask = '') {
   const files = graph.files || [];
   const byPath = new Map(files.map(f => [f.path, f]));
   const scopedSet = new Set();
@@ -1906,6 +2076,14 @@ function emitMultiMap(scopes, routing, graph, root) {
   const routingLines = buildRoutingLines(scopes, routing);
   console.log('ROUTING: ' + routingLines[0]);
   for (const l of routingLines.slice(1)) console.log('         ' + l);
+
+  // CANDIDATE RULE — a constraint embedded in the prompt. Scan the full verbatim
+  // prompt, not the per-task slices, since splitTasks may drop a non-imperative
+  // constraint sentence.
+  const constraint = findPromptConstraint(fullTask || scopes.map(s => s.text).join('. '));
+  if (constraint) {
+    console.log(`⚑ CANDIDATE RULE: "${constraint}" — propose via /vectora learn after the receipt.`);
+  }
 
   scopes.forEach((s, i) => {
     const relevant = routing.fileSets[i];
@@ -2100,6 +2278,37 @@ function runCheck({ root = process.cwd() } = {}) {
         console.log(`  ⚠ ${shortPath(t.src)} changed but ${shortPath(t.test)} wasn't — update the test?`);
       }
     }
+  }
+
+  // ── Change 4: styled receipt box (null or signal) ─────────────────────────
+  const hasSignal = confirmedBreaks.length > 0 || misses.length > 0 ||
+                    callerWarnings.length > 0 || staleTests.length > 0;
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (!hasSignal) {
+    console.log('');
+    console.log(box('VECTORA RECEIPT', [
+      'SIGNAL NULL — no arity edges, co-change peers, or caller',
+      'links in this file set. Graph not applicable.',
+      '',
+      `Ran: check · ${today}`,
+    ]));
+  } else {
+    const receiptLines = [];
+    for (const b of confirmedBreaks.slice(0, 3)) {
+      receiptLines.push(`✗ BROKEN: ${shortPath(b.importer)}:${b.symbol}() called with ${b.got} arg${b.got !== 1 ? 's' : ''}`);
+    }
+    for (const m of misses.slice(0, 3)) {
+      receiptLines.push(`⚑ Co-change miss: ${shortPath(m.missing)} (not in file set)`);
+    }
+    for (const w of callerWarnings.slice(0, 3)) {
+      receiptLines.push(`⚠ Caller warning: ${shortPath(w.importer)} imports changed symbol`);
+    }
+    if (staleTests.length === 0) receiptLines.push('─ No stale tests');
+    receiptLines.push('');
+    receiptLines.push(`Ran: check · ${today}`);
+    console.log('');
+    console.log(box('VECTORA RECEIPT', receiptLines));
   }
 
   if (!reported) {
@@ -3761,6 +3970,8 @@ module.exports = {
   runMap,
   runCheck,
   findSeeds,
+  findSpecSeeds,
+  findPromptConstraint,
   expandNeighborhood,
   runStatus,
   runWhy,
@@ -3817,6 +4028,7 @@ module.exports = {
   classifyRouting,
   collectDecisions,
   groupEditedByTask,
+  box,
 };
 
 if (require.main === module) main();

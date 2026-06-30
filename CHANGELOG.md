@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.6.0] — 2026-06-30
+
+**Spec-file scoping + prompt-embedded rule capture.** Closes two gaps a real session exposed: a named doc/spec file never entered scope, and a constraint stated inside the prompt was never captured.
+
+### Added
+- **Forced spec-file seeds in `map`.** When a prompt names a `.md`/`.txt`/`.rst` file that exists on disk (e.g. "read `DESIGN.md` and …"), `findSpecSeeds` injects it as a top-ranked seed in the `START HERE` block, even though it lives outside the import graph. The file is the authority for the task; previously `findSeeds` could never surface it. Resolved against the repo root and verified to exist — non-existent references are never hallucinated into scope.
+- **Candidate-rule detection in `map`.** `findPromptConstraint` scans the verbatim prompt for embedded permissions ("you may", "feel free to"), bounds ("but only", "only slightly", "no more than"), and conventions ("we never", "we prefer"), and emits a `⚑ CANDIDATE RULE` line in the map block. Because the agent emits the block verbatim, the constraint is guaranteed visible for proposal via `/vectora learn` after the receipt. Deterministic and offline; still user-in-the-loop — no rule is written silently.
+- **Fourth background-capture question** in the skill — "did the prompt itself state a constraint, permission, or preference about *how* to execute?" — paired with the `⚑ CANDIDATE RULE` signal. The `[ARCHITECTURAL SIGNAL]` reference now spans questions 1–4.
+
 ## [2.5.1] — 2026-06-30
 
 **Cross-session memory hardening.** Fixes a contamination bug the v2.5 multi-task work introduced, adds recency decay, and makes the rulebook shareable.

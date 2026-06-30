@@ -1,6 +1,6 @@
 ---
 name: vectora
-version: 2.5.1
+version: 2.6.0
 license: MIT
 description: The scoped replacement for CLAUDE.md — gives your coding agent the minimal relevant file set and only the rules that apply per task, decomposes multi-step prompts and routes them (incl. parallel sub-agents), surfaces git+session co-change, and closes with an honest involvement banner. Everything runs internally behind `/vectora`.
 ---
@@ -36,9 +36,9 @@ Active when a task involves reading or modifying source code: bug fixes, feature
 1. Run: `npx vectora map "<full prompt, verbatim>"`. vectora decomposes the prompt into one or more tasks and emits a lean, per-task scope.
 2. **Emit the entire `[VECTORA MAP] … [END VECTORA MAP]` block verbatim** as the first lines of your response. It is terse by design — do not trim it.
 3. **Read the `ROUTING` line.** For tasks marked **independent (disjoint scope)**, spawn one sub-agent per task, each prepended with only that task's scope block (see BEFORE SPAWNING SUB-AGENTS) — this keeps every agent's context small. For **chained / shared-scope** tasks, run them in order and reuse context.
-4. **Per task, load only the `FILES` you judge relevant** — they are suggestions, nothing is hidden, open anything else you need. **State `loaded: K/relevant`** for each task so the user sees how tightly scoped it was.
+4. **Per task, load only the `FILES` you judge relevant** — they are suggestions, nothing is hidden, open anything else you need. **State `loaded: K/relevant`** for each task so the user sees how tightly scoped it was. Files tagged `[recently edited]` were touched in the previous map session — prioritize reading those regions.
 5. **Honor the scoped `RULES`** surfaced for each task — they are this project's institutional memory, the same rules CLAUDE.md would carry, but only the ones this task touches.
-6. **Read the `CO-CHANGE` section.** Those files are edited together across real commits; if you change one, consider whether its partner needs the change too — the bug grep would let you ship.
+6. **Read the `CO-CHANGE` section.** Those files are edited together across real commits; if you change one, consider whether its partner needs the change too — the bug grep would let you ship. If the map emitted `[GRAPH SIGNAL: WEAK]`, skip this step — the graph has no meaningful signal for this file set.
 7. Execute the task(s) completely.
 8. When done, run `npx vectora check`. Show its receipt **and the involvement banner** as the final lines of your response — every prompt closes with that honest summary of what vectora did.
 
@@ -132,80 +132,6 @@ Do **not** invent rules the graph doesn't support. Every proposed rule should be
 ## /vectora check
 Run `npx vectora check` — output the receipt verbatim (see THE RECEIPT above). Works even without a prior `map`.
 
-## /vectora receipts
-Run `npx vectora receipts` — show the lifetime count of incomplete edits vectora has flagged in this repo: confirmed breaks, forgotten co-change files, callers to verify, stale tests. An honest ledger — every entry is a real event, never invented. Output verbatim.
-
-## /vectora status
-Run `npx vectora status` — output its result verbatim.
-
-## /vectora diff
-Run `npx vectora diff` — fast incremental graph update. Always outputs the current graph state (file count, domains, age), whether or not anything changed. Output result verbatim.
-
-## /vectora watch
-Run `npx vectora watch` in the background. Output: `↺ vectora: watcher started — graph rebuilds automatically on file changes.`
-
-## /vectora why \<filepath\>
-Run `npx vectora why <filepath>` — explains a file's centrality, blast radius, importers, and co-change peers. Output verbatim.
-
-## /vectora impact \<file|symbol\>
-Run `npx vectora impact <target>` — "what breaks if I change this?" For a file: direct + transitive dependents. For a symbol: the files that consume it. History-free. Output verbatim.
-
-## /vectora overview
-Run `npx vectora overview` — architecture summary: most-depended-on files, domains, entry points, orphans (possible dead code), and circular imports. The best first action when you land in an unfamiliar or brand-new repo. Output verbatim.
-
-## /vectora trace \<symbol\>
-Run `npx vectora trace <symbol>` — where the symbol is defined, who calls it, and what its file depends on. Output verbatim.
-
-## /vectora preflight
-Run `npx vectora preflight` and output verbatim. Use this before starting any large or risky session. Reports: graph staleness, open co-change misses from the last session, danger zone inventory (all `@vectora danger` annotations on files in your task scope), global rule count from `decisions.json`, and cycle presence.
-
-## /vectora manifest
-Run `npx vectora manifest` and output verbatim. Use this after finishing a session to produce a causal receipt: which files were directly targeted, which changed because of structural coupling, which were flagged but left unedited, and lifetime ledger totals. Paste the output into the PR description — it explains *why* each file changed, not just *what* changed.
-
-## /vectora history \<filepath\>
-Run `npx vectora history <filepath>` and output verbatim. Shows cross-session coupling memory for a file: how many times it was changed, which files were co-edited in those sessions, and which co-change partners were flagged but never resolved. If a partner appears flagged 3+ times without being edited, propose capturing it with `/vectora learn`.
-
-## /vectora impact-report
-Run `npx vectora impact-report` and output verbatim. 30-day aggregate summary of what vectora caught: confirmed arity breaks, co-change links used/missed, callers warned, stale tests flagged, highest-risk file, coupling debt trend. Share in retrospectives or paste in team channels.
-
-## /vectora overview --debt
-Run `npx vectora overview --debt` and output verbatim. Coupling debt scores for every tracked file pair: co-change frequency, shared imports, test coverage penalty. The highest-debt pairs with no test coverage are the ones most likely to produce silent bugs.
-
-## /vectora help  or  /vectora \<unknown keyword\>
-Output:
-```
-╔─ vectora help ─────────────────────────────────────────────────────╗
-│                                                                    │
-│  /vectora <task>            map the task, navigate, then check    │
-│  /vectora check             receipt: breaks, co-change, callers   │
-│  /vectora preflight         situational awareness before a task   │
-│  /vectora manifest          causal PR receipt after a session     │
-│  /vectora history <file>    cross-session coupling memory         │
-│  /vectora impact-report     30-day summary — shareable            │
-│  /vectora overview --debt   coupling debt scores by file pair     │
-│  /vectora init              build the graph (offline, 0 tokens)   │
-│  /vectora impact <x>        what breaks if I change this?         │
-│  /vectora overview          architecture summary (great on new)   │
-│  /vectora trace <sym>       where a symbol is defined & used      │
-│  /vectora why <file>        explain a file's graph position       │
-│  /vectora diff              fast incremental graph update         │
-│  /vectora status            graph state                           │
-│  /vectora watch             auto-rebuild on file changes          │
-│  /vectora learn <rule>      teach vectora an architectural rule   │
-│  /vectora migrate           extract rules from CLAUDE.md, README  │
-│  /vectora help              show this message                     │
-│                                                                    │
-╚────────────────────────────────────────────────────────────────────╝
-```
-
----
-
-# INSTITUTIONAL MEMORY (optional, user-driven)
-
-vectora can persist architectural rules to `.vectora/decisions.json`; the map surfaces only the rules whose domain the current task touches — scoped, not dumped. This is **always user-in-the-loop** — never write a rule silently.
-
-`.vectora/decisions.json` is the **committed, team-shared rulebook** — the real replacement for CLAUDE.md. `init` writes a `.vectora/.gitignore` that tracks `decisions.json` and ignores everything else (`graph.json`, `observed.json` session coupling, and the `ledger.json` are per-developer). Commit `decisions.json` so your whole team shares one rulebook. (If you previously added `.vectora/` to your *root* `.gitignore`, narrow it — a fully-ignored directory can't un-ignore its children.)
-
 ## /vectora learn \<rule\>
 1. Decide if the rule is global or domain-specific.
 2. **Ask the user:** *"You asked to learn: `<rule>`. Should I write this to vectora's memory?"*
@@ -214,6 +140,16 @@ vectora can persist architectural rules to `.vectora/decisions.json`; the map su
 ## /vectora unlearn \<rule\>
 1. Ask the user to confirm.
 2. On approval: `npx vectora unlearn "<rule>"`.
+
+For the full command catalog, run `/vectora help` in the terminal.
+
+---
+
+# INSTITUTIONAL MEMORY (optional, user-driven)
+
+vectora can persist architectural rules to `.vectora/decisions.json`; the map surfaces only the rules whose domain the current task touches — scoped, not dumped. This is **always user-in-the-loop** — never write a rule silently.
+
+`.vectora/decisions.json` is the **committed, team-shared rulebook** — the real replacement for CLAUDE.md. `init` writes a `.vectora/.gitignore` that tracks `decisions.json` and ignores everything else (`graph.json`, `observed.json` session coupling, and the `ledger.json` are per-developer). Commit `decisions.json` so your whole team shares one rulebook. (If you previously added `.vectora/` to your *root* `.gitignore`, narrow it — a fully-ignored directory can't un-ignore its children.)
 
 ## /vectora migrate
 Run `npx vectora migrate` and output the block verbatim. The command auto-discovers CLAUDE.md, README.md, .cursorrules, CONTRIBUTING.md, docs/ARCHITECTURE.md, and any RULES.md / DECISIONS.md / CONVENTIONS.md files in the repo — no filepath arg needed.
@@ -224,17 +160,18 @@ The user can trigger this with `/vectora migrate`, or naturally: "extract rules 
 
 ## Background capture — when to propose `/vectora learn`
 
-After any task completes, ask yourself three questions before emitting the final receipt:
+After any task completes, ask yourself four questions before emitting the final receipt:
 
 1. **Did the user correct an architectural assumption I made?** ("don't do X, we use Y here", "no, that pattern doesn't apply in this codebase")
 2. **Did the user choose between two approaches with a stated reason?** (option A vs. B, where they named a constraint or preference)
 3. **Did the check reveal a structural invariant that should always hold?** (a co-change miss that was real, an arity break that exposed an undocumented contract, a coupling that "must always move together")
+4. **Did the prompt itself state a constraint, permission, or preference about *how* to execute the task?** ("you may do X but only slightly", "feel free to Y", "we never Z in this codebase"). The map's `⚑ CANDIDATE RULE` line flags these for you when it can — but check the prompt yourself too, since a phrasing it didn't match can still encode a durable rule.
 
 If yes to any: *"I noticed a constraint: `<rule>`. Add it to vectora's memory?"* On approval: `npx vectora learn "<rule>"`.
 
 **Do NOT propose for:** style choices, naming preferences, one-off workarounds, pure bug fixes with no generalizable pattern, anything the user has already said is intentional.
 
-**`[ARCHITECTURAL SIGNAL]` from check:** When `npx vectora check` output contains an `[ARCHITECTURAL SIGNAL]` block, it means the task had structural breadth: multiple new files created, or many co-change/caller peers flagged. This is a stronger hint that an architectural decision was made. Re-read the task and ask yourself question 1–3 above with extra attention. If a rule emerges, propose it.
+**`[ARCHITECTURAL SIGNAL]` from check:** When `npx vectora check` output contains an `[ARCHITECTURAL SIGNAL]` block, it means the task had structural breadth: multiple new files created, or many co-change/caller peers flagged. This is a stronger hint that an architectural decision was made. Re-read the task and ask yourself questions 1–4 above with extra attention. If a rule emerges, propose it.
 
 ---
 

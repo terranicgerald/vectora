@@ -1,6 +1,6 @@
 {
   "name": "vectora",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "description": "The scoped replacement for CLAUDE.md — gives your AI coding agent the minimal relevant files and only the rules that apply per task, decomposes and routes multi-step prompts, and surfaces git co-change grep can't see.",
   "keywords": [
     "vectora",
