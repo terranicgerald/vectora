@@ -93,9 +93,13 @@ Show the receipt verbatim.
 
 # FOLLOW-UP DETECTION
 
-A prompt is a **follow-up** when it is short (≤15 words), contains a deictic reference ("it", "that", "this", "instead", "also", "just", "actually"), and names no new file/feature/domain.
+A prompt is a **follow-up** when it is short (≤15 words), contains a deictic reference ("it", "that", "this", "instead", "also", "just", "actually"), and names no new file/feature/domain — **and a `[VECTORA MAP]` block from the current session exists in context and has not been invalidated**.
 
-If follow-up:
+**Two conditions force a full `map` run regardless of follow-up signals:**
+1. **No `[VECTORA MAP]` in context** — this is a fresh session (new session or after `/clear`). Run map unconditionally so `decisions.json` rules are loaded before any work begins.
+2. **A `/vectora learn` or `/vectora unlearn` was executed after the last map** — the map in context predates the rule change and is stale. Run map again so the new rule is in scope.
+
+If follow-up (map in context, no rule changes since last map):
 - Do **not** re-run `npx vectora map`. Reuse the map and files already in context.
 - Execute using inherited context.
 - You may run `npx vectora check` again at the end if you made further edits.
@@ -129,16 +133,18 @@ Run `npx vectora check` — output the receipt verbatim (see THE RECEIPT above).
 1. Decide if the rule is global or domain-specific.
 2. **Ask the user:** *"You asked to learn: `<rule>`. Should I write this to vectora's memory?"*
 3. On approval: `npx vectora learn "<rule>" --domain <domain>` (omit `--domain` if global).
+4. **Mark the current map stale.** Any `[VECTORA MAP]` already in context predates this rule. The next coding task — even if it looks like a follow-up — must re-run `npx vectora map` so the new rule surfaces in scope.
 
 ## /vectora unlearn \<rule\>
 1. Ask the user to confirm.
 2. On approval: `npx vectora unlearn "<rule>"`.
+3. **Mark the current map stale** — same as after `learn`; re-run map on the next coding task.
 
 For the full command catalog, run `/vectora help` in the terminal.
 
 ---
 
-# INSTITUTIONAL MEMORY (optional, user-driven)
+# INSTITUTIONAL MEMORY ( user-driven)
 
 vectora can persist architectural rules to `.vectora/decisions.json`; the map surfaces only the rules whose domain the current task touches — scoped, not dumped. This is **always user-in-the-loop** — never write a rule silently.
 
@@ -197,6 +203,7 @@ At `map` time, if any seed or co-change partner carries a danger annotation, vec
 
 When `npx vectora map` reports no graph:
 - It will emit a degraded `[VECTORA MAP]` banner — emit it verbatim.
+- Run `npx vectora decisions` and emit its block verbatim — this surfaces all global `decisions.json` rules in a compact, low-token form so institutional memory is never silently skipped even without a graph.
 - Proceed with the task by your own best judgment (folder-structure inference).
 - After finishing, remind the user: *"Run `npx vectora init` to build the graph — it's offline and instant, and unlocks the co-change receipt."*
 

@@ -196,6 +196,8 @@ function main() {
     const target = args.slice(1).join(' ');
     if (!target) { console.error('vectora impact: provide a file path or exported symbol'); process.exit(1); }
     runImpact(target);
+  } else if (subcmd === 'decisions') {
+    runDecisions();
   } else if (subcmd === 'receipts') {
     runReceipts();
   } else if (subcmd === 'trace') {
@@ -234,6 +236,7 @@ Commands:
   vectora overview             Architecture summary: central files, domains, cycles, orphans
   vectora overview --debt      Coupling debt scores: highest-risk file pairs, test coverage gaps
   vectora trace <symbol>       Where a symbol is defined, who calls it, what it calls
+  vectora decisions            Compact summary of decisions.json (global rules + domain counts)
   vectora receipts             Lifetime count of incomplete edits vectora has flagged
   vectora watch                Watch for file changes, rebuild automatically
   vectora --reset              Force a full rescan (alias for init)
@@ -2990,6 +2993,40 @@ function runPreflight({ root = process.cwd() } = {}) {
   }
 
   console.log('[END VECTORA PREFLIGHT]');
+}
+
+// ─── Decisions ────────────────────────────────────────────────────────────────
+// Compact, low-token summary of decisions.json for fresh-session bootstrap.
+// Global rules are printed in full (they apply to every task).
+// Domain rules are shown as name+count only — map surfaces them scoped when it runs.
+
+function runDecisions({ root = process.cwd() } = {}) {
+  const decisionsPath = path.join(root, '.vectora', 'decisions.json');
+  console.log('[VECTORA DECISIONS]');
+  if (!fs.existsSync(decisionsPath)) {
+    console.log('  no decisions.json — run /vectora learn "<rule>" to add one.');
+    console.log('[END VECTORA DECISIONS]');
+    return;
+  }
+  let d;
+  try { d = JSON.parse(fs.readFileSync(decisionsPath, 'utf8')); } catch {
+    console.log('  decisions.json is invalid JSON.');
+    console.log('[END VECTORA DECISIONS]');
+    return;
+  }
+  const globals = Array.isArray(d.global) ? d.global : [];
+  if (globals.length) {
+    console.log(`global (${globals.length}):`);
+    for (const r of globals) console.log(`  · ${r}`);
+  } else {
+    console.log('global: none');
+  }
+  const domains = d.domains && typeof d.domains === 'object' ? Object.entries(d.domains) : [];
+  if (domains.length) {
+    const summary = domains.map(([k, v]) => `${k} (${Array.isArray(v) ? v.length : 0})`).join(', ');
+    console.log(`domains: ${summary}`);
+  }
+  console.log('[END VECTORA DECISIONS]');
 }
 
 // ─── Impact Report ────────────────────────────────────────────────────────────

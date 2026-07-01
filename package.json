@@ -1,6 +1,6 @@
 {
   "name": "vectora",
-  "version": "2.7.0",
+  "version": "2.8.0",
   "description": "Cuts context bloat by loading only files relevant to the current task, auto-learns coding patterns as you work, and lets you lock in rules across sessions with a single command.",
   "keywords": [
     "vectora",
